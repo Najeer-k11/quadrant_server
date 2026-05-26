@@ -159,11 +159,3 @@ final app = QuadrantServer(
   onError: (error, req) => Response.internalServerError(error.toString()),
 );
 ```
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
