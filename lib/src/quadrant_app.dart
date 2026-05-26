@@ -83,31 +83,42 @@ class QuadrantServer {
     final requestHash = httpRequest.hashCode;
 
     try {
-      // Match route
-      final match = _router.match(request.method, request.path);
+      // Match route using the new sealed result type.
+      final result = _router.match(request.method, request.path);
 
-      if (match == null) {
-        final response = Response.notFound('Route not found');
-        _writeResponse(httpRequest.response, response);
-        return;
+      switch (result) {
+        case NotFound():
+          final response = Response.notFound('Route not found');
+          _writeResponse(httpRequest.response, response);
+          return;
+
+        case MethodNotAllowed(:final allowedMethods):
+          final response = Response(
+            statusCode: 405,
+            headers: {'allow': allowedMethods.join(', ')},
+            body: '{"error":"Method not allowed"}',
+          );
+          _writeResponse(httpRequest.response, response);
+          return;
+
+        case Matched(:final route, :final params):
+          // Attach path params to request
+          request = request.copyWith(params: params);
+
+          // Build middleware chain: [global] + [route-level] + [handler]
+          final allMiddlewares = [...middlewares, ...route.middlewares];
+
+          // Execute the chain
+          final response = await _executeChain(
+            allMiddlewares,
+            0,
+            request,
+            route.handler,
+            requestHash,
+          );
+
+          _writeResponse(httpRequest.response, response);
       }
-
-      // Attach path params to request
-      request = request.copyWith(params: match.params);
-
-      // Build middleware chain: [global] + [route-level] + [handler]
-      final allMiddlewares = [...middlewares, ...match.route.middlewares];
-
-      // Execute the chain
-      final response = await _executeChain(
-        allMiddlewares,
-        0,
-        request,
-        match.route.handler,
-        requestHash,
-      );
-
-      _writeResponse(httpRequest.response, response);
     } catch (error) {
       final response = onError != null
           ? onError!(error, request)

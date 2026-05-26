@@ -1,39 +1,126 @@
+// ============================================================
+// router.dart — QuadrantServer Route Matching Implementation
+// ============================================================
+//
+// IMPROVEMENTS OVER NAIVE LINEAR SCAN:
+//
+// 1. O(n/m) lookup — routes grouped by HTTP method
+// 2. Method normalization — 'get' and 'GET' both work
+// 3. HEAD → GET fallback — HTTP spec compliance
+// 4. Trailing slash normalization — '/users/' == '/users'
+// 5. 405 Method Not Allowed — distinguishes "wrong method" from "not found"
+// 6. URI-decoded params — '%20' in path segments decoded automatically
+//
+// ============================================================
+
 import 'route.dart';
 
-/// Result of a successful route match.
-class RouteMatch {
+// ─── Normalize path helper ───────────────────────────────────
+
+/// Strips trailing slash unless path is root '/'.
+/// '/users/'  → '/users'
+/// '/users'   → '/users'
+/// '/'        → '/'
+String _normalizePath(String path) {
+  if (path.length > 1 && path.endsWith('/')) {
+    return path.substring(0, path.length - 1);
+  }
+  return path;
+}
+
+// ─── RouteMatch result — sealed pattern ──────────────────────
+
+/// Result of attempting to match an incoming request to a route.
+sealed class RouteMatchResult {}
+
+/// Path found, method matched — ready to handle.
+class Matched extends RouteMatchResult {
   final Route route;
   final Map<String, String> params;
 
-  const RouteMatch({required this.route, required this.params});
+  Matched({required this.route, required this.params});
 }
 
-/// Internal router. Matches incoming requests to registered routes.
+/// Path exists in router but not for this HTTP method.
+/// Server should respond 405 and set Allow header.
+class MethodNotAllowed extends RouteMatchResult {
+  final List<String> allowedMethods;
+
+  MethodNotAllowed({required this.allowedMethods});
+}
+
+/// Path does not exist at all.
+/// Server should respond 404.
+class NotFound extends RouteMatchResult {}
+
+// ─── Router ──────────────────────────────────────────────────
+
+/// Internal router. Groups routes by HTTP method for fast lookup.
+/// Returns typed [RouteMatchResult] for proper 404 vs 405 handling.
 class Router {
-  final List<Route> _routes;
+  /// Routes grouped by HTTP method for O(n/m) lookup.
+  final Map<String, List<Route>> _routesByMethod = {};
 
-  Router(this._routes);
+  /// Flat list for MethodNotAllowed lookup.
+  final List<Route> _allRoutes = [];
 
-  /// Attempts to match the given [method] and [path] to a registered route.
-  ///
-  /// Returns a [RouteMatch] with extracted path params on success, or null
-  /// if no route matches.
-  RouteMatch? match(String method, String path) {
-    for (final route in _routes) {
-      if (route.method != method) continue;
-
-      final params = _matchPath(route.path, path);
-      if (params != null) {
-        return RouteMatch(route: route, params: params);
-      }
+  Router(List<Route> routes) {
+    for (final route in routes) {
+      final method = route.method.toUpperCase();
+      _routesByMethod.putIfAbsent(method, () => []).add(route);
+      _allRoutes.add(route);
     }
-    return null;
   }
 
-  /// Matches a route pattern against an actual path.
+  /// Match an incoming [method] + [path] against registered routes.
+  /// Returns [Matched], [MethodNotAllowed], or [NotFound].
+  RouteMatchResult match(String method, String path) {
+    final normalizedMethod = method.toUpperCase();
+    final normalizedPath = _normalizePath(path);
+
+    // HEAD falls back to GET routes (HTTP spec requirement).
+    final lookupMethods =
+        normalizedMethod == 'HEAD' ? ['HEAD', 'GET'] : [normalizedMethod];
+
+    for (final m in lookupMethods) {
+      final candidates = _routesByMethod[m] ?? [];
+      for (final route in candidates) {
+        final params = _matchPath(route.path, normalizedPath);
+        if (params != null) {
+          return Matched(route: route, params: params);
+        }
+      }
+    }
+
+    // Check if path exists under any other method → 405.
+    final allowedMethods = _findAllowedMethods(normalizedPath);
+    if (allowedMethods.isNotEmpty) {
+      return MethodNotAllowed(allowedMethods: allowedMethods);
+    }
+
+    return NotFound();
+  }
+
+  /// Returns which HTTP methods are registered for this [path].
+  /// Used to build the `Allow` header on 405 responses.
+  List<String> _findAllowedMethods(String path) {
+    final allowed = <String>[];
+    for (final route in _allRoutes) {
+      if (_matchPath(route.path, path) != null) {
+        allowed.add(route.method);
+      }
+    }
+    // If GET is allowed, HEAD is implicitly allowed too.
+    if (allowed.contains('GET') && !allowed.contains('HEAD')) {
+      allowed.add('HEAD');
+    }
+    return allowed;
+  }
+
+  /// Match a route [pattern] against an incoming [path].
   ///
-  /// Returns extracted params map on success, null on failure.
-  /// Supports :param segments (e.g. /users/:id matches /users/123).
+  /// Returns a params map on success: {'id': '42'}
+  /// Returns null if the path does not match the pattern.
   Map<String, String>? _matchPath(String pattern, String path) {
     final patternSegments = _segments(pattern);
     final pathSegments = _segments(path);
@@ -43,14 +130,14 @@ class Router {
     final params = <String, String>{};
 
     for (var i = 0; i < patternSegments.length; i++) {
-      final patternSeg = patternSegments[i];
-      final pathSeg = pathSegments[i];
+      final p = patternSegments[i];
+      final s = pathSegments[i];
 
-      if (patternSeg.startsWith(':')) {
-        // Dynamic segment — extract param
-        params[patternSeg.substring(1)] = pathSeg;
-      } else if (patternSeg != pathSeg) {
-        // Static segment mismatch
+      if (p.startsWith(':')) {
+        // Dynamic segment — capture value (URI-decoded).
+        params[p.substring(1)] = Uri.decodeComponent(s);
+      } else if (p != s) {
+        // Static segment mismatch.
         return null;
       }
     }

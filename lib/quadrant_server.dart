@@ -3,7 +3,7 @@
 /// Built directly on dart:io with zero external dependencies.
 library quadrant_server;
 
-export 'src/apex_app.dart';
+export 'src/quadrant_app.dart';
 export 'src/middleware.dart';
 export 'src/request.dart';
 export 'src/response.dart';
