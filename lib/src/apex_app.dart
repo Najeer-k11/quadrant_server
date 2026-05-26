@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'docs.dart';
 import 'middleware.dart';
 import 'request.dart';
 import 'response.dart';
@@ -31,6 +32,9 @@ class QuadrantServer {
   /// Flat list of route definitions.
   final List<Route> routes;
 
+  /// Whether the /quadrant_docs endpoint is enabled. Default: false.
+  final bool docs;
+
   /// Optional global error handler. Returns a [Response].
   final ErrorHandler? onError;
 
@@ -40,7 +44,21 @@ class QuadrantServer {
     this.middlewares = const [],
     required this.routes,
     this.onError,
-  }) : _router = Router(routes);
+    this.docs = false,
+  }) : _router = Router(_buildRouteList(routes, docs));
+
+  /// Builds the final route list, conditionally adding /quadrant_docs.
+  static List<Route> _buildRouteList(List<Route> routes, bool docs) {
+    if (!docs) return routes;
+
+    return [
+      ...routes,
+      Route.get(
+        path: '/quadrant_docs',
+        handler: docsHandler(routes), // pass original routes only
+      ),
+    ];
+  }
 
   /// Binds a dart:io [HttpServer] to the given [port] and starts handling
   /// incoming requests.

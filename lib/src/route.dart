@@ -32,63 +32,78 @@ class Route {
     this.middlewares = const [],
   });
 
+  /// Extracts parameter names from the path pattern.
+  /// e.g. '/users/:id/posts/:postId' → ['id', 'postId']
+  List<String> get paramNames {
+    return path
+        .split('/')
+        .where((s) => s.startsWith(':'))
+        .map((s) => s.substring(1))
+        .toList();
+  }
+
   /// GET route.
   factory Route.get({
     required String path,
     required Handler handler,
     List<Middleware> middlewares = const [],
-  }) => Route(
-    method: 'GET',
-    path: path,
-    handler: handler,
-    middlewares: middlewares,
-  );
+  }) =>
+      Route(
+        method: 'GET',
+        path: path,
+        handler: handler,
+        middlewares: middlewares,
+      );
 
   /// POST route.
   factory Route.post({
     required String path,
     required Handler handler,
     List<Middleware> middlewares = const [],
-  }) => Route(
-    method: 'POST',
-    path: path,
-    handler: handler,
-    middlewares: middlewares,
-  );
+  }) =>
+      Route(
+        method: 'POST',
+        path: path,
+        handler: handler,
+        middlewares: middlewares,
+      );
 
   /// PUT route.
   factory Route.put({
     required String path,
     required Handler handler,
     List<Middleware> middlewares = const [],
-  }) => Route(
-    method: 'PUT',
-    path: path,
-    handler: handler,
-    middlewares: middlewares,
-  );
+  }) =>
+      Route(
+        method: 'PUT',
+        path: path,
+        handler: handler,
+        middlewares: middlewares,
+      );
 
   /// DELETE route.
   factory Route.delete({
     required String path,
     required Handler handler,
     List<Middleware> middlewares = const [],
-  }) => Route(
-    method: 'DELETE',
-    path: path,
-    handler: handler,
-    middlewares: middlewares,
-  );
+  }) =>
+      Route(
+        method: 'DELETE',
+        path: path,
+        handler: handler,
+        middlewares: middlewares,
+      );
 
   /// PATCH route.
   factory Route.patch({
     required String path,
     required Handler handler,
     List<Middleware> middlewares = const [],
-  }) => Route(
-    method: 'PATCH',
-    path: path,
-    handler: handler,
-    middlewares: middlewares,
-  );
+  }) =>
+      Route(
+        method: 'PATCH',
+        path: path,
+        handler: handler,
+        middlewares: middlewares,
+      );
 }

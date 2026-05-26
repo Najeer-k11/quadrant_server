@@ -25,6 +25,7 @@ void main() async {
       Route.get(path: '/users/:id', handler: getUser),
       Route.post(path: '/users', handler: createUser),
     ],
+    docs: true
   );
 
   await app.listen(port: 3000);
