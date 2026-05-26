@@ -1,3 +1,6 @@
+## 1.0.1
+- Docs Opt in endpoint with swagger UI
+
 ## 1.0.0
 
 - Initial release
