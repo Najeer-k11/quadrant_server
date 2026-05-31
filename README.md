@@ -140,6 +140,7 @@ final app = QuadrantServer(
       middlewares: [auth()],  // route-level
     ),
   ],
+  docs: true, // endpoint - quadrant_docs
 );
 ```
 
@@ -159,3 +160,7 @@ final app = QuadrantServer(
   onError: (error, req) => Response.internalServerError(error.toString()),
 );
 ```
+
+## Real-World Example
+
+Check the [`example/`](example/) folder for a production-ready project structure including a `Dockerfile` for containerized deployment. It demonstrates routing, middleware composition, error handling, and Docker-based deployment in a single runnable app.

@@ -10,10 +10,10 @@ import 'route.dart';
 /// [routes] must be the user's original route list (excludes /quadrant_docs).
 Handler docsHandler(List<Route> routes) {
   return (Request req) async {
-    final ip = req.raw.connectionInfo?.remoteAddress;
-    if (ip == null || !ip.isLoopback) {
-      return Response.notFound('Route not found');
-    }
+    // final ip = req.raw.connectionInfo?.remoteAddress;
+    // if (ip == null || !ip.isLoopback) {
+    //   return Response.notFound('Route not found');
+    // }
 
     final routeData = routes
         .map((r) => <String, dynamic>{
