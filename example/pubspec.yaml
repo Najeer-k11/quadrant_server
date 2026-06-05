@@ -9,7 +9,8 @@ environment:
 # Add regular dependencies here.
 dependencies:
   path: ^1.9.0
-  quadrant_server: ^1.1.0
+  quadrant_server:
+    path: ..
 
 dev_dependencies:
   lints: ^6.0.0

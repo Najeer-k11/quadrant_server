@@ -212,11 +212,10 @@ packages:
   quadrant_server:
     dependency: "direct main"
     description:
-      name: quadrant_server
-      sha256: b04012bbf7a0af621bd9d824e226a2f3e865420dbe16016ad0c5826bf3a6a00a
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.1.0"
+      path: ".."
+      relative: true
+    source: path
+    version: "1.2.0"
   shelf:
     dependency: transitive
     description:

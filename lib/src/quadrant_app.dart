@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'docs.dart';
@@ -6,6 +7,8 @@ import 'request.dart';
 import 'response.dart';
 import 'route.dart';
 import 'router.dart';
+import 'websocket_context.dart';
+import 'websocket_route.dart';
 import 'middlewares/body_parser.dart';
 
 /// Error handler type — receives the error and the request, returns a Response.
@@ -32,6 +35,9 @@ class QuadrantServer {
   /// Flat list of route definitions.
   final List<Route> routes;
 
+  /// WebSocket route definitions.
+  final List<WebSocketRoute> webSocketRoutes;
+
   /// Whether the /quadrant_docs endpoint is enabled. Default: false.
   final bool docs;
 
@@ -43,19 +49,24 @@ class QuadrantServer {
   QuadrantServer({
     this.middlewares = const [],
     required this.routes,
+    this.webSocketRoutes = const [],
     this.onError,
     this.docs = false,
-  }) : _router = Router(_buildRouteList(routes, docs));
+  }) : _router = Router(
+          _buildRouteList(routes, docs, webSocketRoutes: webSocketRoutes),
+          webSocketRoutes: webSocketRoutes,
+        );
 
   /// Builds the final route list, conditionally adding /quadrant_docs.
-  static List<Route> _buildRouteList(List<Route> routes, bool docs) {
+  static List<Route> _buildRouteList(List<Route> routes, bool docs,
+      {List<WebSocketRoute> webSocketRoutes = const []}) {
     if (!docs) return routes;
 
     return [
       ...routes,
       Route.get(
         path: '/quadrant_docs',
-        handler: docsHandler(routes), // pass original routes only
+        handler: docsHandler(routes, webSocketRoutes: webSocketRoutes),
       ),
     ];
   }
@@ -83,8 +94,15 @@ class QuadrantServer {
     final requestHash = httpRequest.hashCode;
 
     try {
+      // Detect WebSocket upgrade requests.
+      final isUpgrade = WebSocketTransformer.isUpgradeRequest(httpRequest);
+
       // Match route using the new sealed result type.
-      final result = _router.match(request.method, request.path);
+      final result = _router.match(
+        request.method,
+        request.path,
+        isUpgradeRequest: isUpgrade,
+      );
 
       switch (result) {
         case NotFound():
@@ -118,6 +136,31 @@ class QuadrantServer {
           );
 
           _writeResponse(httpRequest.response, response);
+
+        case MatchedWebSocket(:final route, :final params):
+          final wsRequest = request.copyWith(params: params);
+
+          // Run middleware chain — null means "chain passed, proceed".
+          final middlewareChain = [...middlewares, ...route.middlewares];
+          final rejected = await _runMiddlewareChainForUpgrade(
+            wsRequest,
+            middlewareChain,
+            0,
+            requestHash,
+          );
+
+          if (rejected != null) {
+            // Middleware rejected — write HTTP response, no upgrade.
+            _writeResponse(httpRequest.response, rejected);
+            return;
+          }
+
+          try {
+            final ctx = await WebSocketContext.fromUpgrade(wsRequest);
+            await _handleWebSocket(ctx, route);
+          } catch (_) {
+            // Upgrade failed — dart:io closes the socket automatically.
+          }
       }
     } catch (error) {
       final response = onError != null
@@ -168,6 +211,93 @@ class QuadrantServer {
         requestHash,
       );
     });
+  }
+
+  /// Runs the middleware chain for WebSocket upgrades.
+  ///
+  /// Returns null if all middlewares pass (proceed with upgrade).
+  /// Returns a [Response] if a middleware rejects the request.
+  Future<Response?> _runMiddlewareChainForUpgrade(
+    Request request,
+    List<Middleware> middlewareList,
+    int index,
+    int requestHash,
+  ) async {
+    // Check if bodyParser has stored a parsed body for this request
+    final parsedBody = RequestHolder.instance.consumeParsedBody(requestHash);
+    if (parsedBody != null) {
+      request = request.copyWith(body: parsedBody);
+    }
+
+    if (index >= middlewareList.length) {
+      return null; // All middlewares passed — proceed with upgrade.
+    }
+
+    final middleware = middlewareList[index];
+
+    // We need to detect if the middleware short-circuits.
+    // If next() is called, we continue the chain.
+    // If a Response is returned without calling next(), it's a rejection.
+    Response? chainResult;
+    bool nextCalled = false;
+
+    final response = await middleware(request, () async {
+      nextCalled = true;
+      final body = RequestHolder.instance.consumeParsedBody(requestHash);
+      final updatedRequest =
+          body != null ? request.copyWith(body: body) : request;
+      chainResult = await _runMiddlewareChainForUpgrade(
+        updatedRequest,
+        middlewareList,
+        index + 1,
+        requestHash,
+      );
+      // Return a dummy response — the actual result is in chainResult.
+      return Response(statusCode: 200);
+    });
+
+    if (!nextCalled) {
+      // Middleware short-circuited — return rejection response.
+      return response;
+    }
+
+    return chainResult;
+  }
+
+  /// Manages the WebSocket lifecycle after a successful upgrade.
+  Future<void> _handleWebSocket(
+    WebSocketContext ctx,
+    WebSocketRoute route,
+  ) async {
+    // onStart — fire immediately after upgrade.
+    if (route.onStart != null) {
+      await route.onStart!(ctx);
+    }
+
+    // Wire the raw socket stream to the route's callbacks.
+    final completer = Completer<void>();
+
+    ctx.socket.listen(
+      (data) async {
+        await route.onMessage(ctx, data);
+      },
+      onError: (Object error) async {
+        if (route.onError != null) {
+          await route.onError!(ctx, error);
+        }
+      },
+      onDone: () async {
+        if (route.onClose != null) {
+          await route.onClose!(
+              ctx, ctx.socket.closeCode, ctx.socket.closeReason);
+        }
+        completer.complete();
+      },
+      cancelOnError: false,
+    );
+
+    // Hold open until the socket closes.
+    await completer.future;
   }
 
   /// Writes a [Response] to the dart:io [HttpResponse] and closes it.

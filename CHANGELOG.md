@@ -1,3 +1,19 @@
+## 1.2.0
+
+### Added
+
+- **WebSocket support** — declarative `WebSocketRoute` with four named callbacks (`onStart`, `onMessage`, `onClose`, `onError`)
+- **`WebSocketContext`** — per-connection context with `send()`, `close()`, and access to the original upgrade request (params, query, headers)
+- **`webSocketRoutes` parameter** on `QuadrantServer` — declare WS endpoints alongside HTTP routes
+- **Middleware support for WebSocket** — route-level middlewares run before upgrade; rejection prevents the upgrade entirely
+- **Path parameters on WS routes** — `/ws/chat/:roomId` extracts params just like HTTP routes
+- **`MatchedWebSocket` sealed type** — router distinguishes WS upgrades from HTTP requests at the type level
+- **Docs: WebSocket section** — `/quadrant_docs` now renders WS endpoints in a table below Swagger UI
+
+### Improved
+
+- **Router** — `match()` accepts `isUpgradeRequest` flag; WS upgrades never fall through to HTTP GET routes
+
 ## 1.1.1
 
 ### Added

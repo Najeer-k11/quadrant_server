@@ -14,6 +14,7 @@
 // ============================================================
 
 import 'route.dart';
+import 'websocket_route.dart';
 
 // ─── Normalize path helper ───────────────────────────────────
 
@@ -53,6 +54,14 @@ class MethodNotAllowed extends RouteMatchResult {
 /// Server should respond 404.
 class NotFound extends RouteMatchResult {}
 
+/// WebSocket route matched — ready to upgrade.
+class MatchedWebSocket extends RouteMatchResult {
+  final WebSocketRoute route;
+  final Map<String, String> params;
+
+  MatchedWebSocket({required this.route, required this.params});
+}
+
 // ─── Router ──────────────────────────────────────────────────
 
 /// Internal router. Groups routes by HTTP method for fast lookup.
@@ -64,7 +73,11 @@ class Router {
   /// Flat list for MethodNotAllowed lookup.
   final List<Route> _allRoutes = [];
 
-  Router(List<Route> routes) {
+  /// WebSocket routes for upgrade requests.
+  final List<WebSocketRoute> _webSocketRoutes;
+
+  Router(List<Route> routes, {List<WebSocketRoute> webSocketRoutes = const []})
+      : _webSocketRoutes = webSocketRoutes {
     for (final route in routes) {
       final method = route.method.toUpperCase();
       _routesByMethod.putIfAbsent(method, () => []).add(route);
@@ -73,10 +86,25 @@ class Router {
   }
 
   /// Match an incoming [method] + [path] against registered routes.
-  /// Returns [Matched], [MethodNotAllowed], or [NotFound].
-  RouteMatchResult match(String method, String path) {
-    final normalizedMethod = method.toUpperCase();
+  /// Returns [Matched], [MatchedWebSocket], [MethodNotAllowed], or [NotFound].
+  ///
+  /// When [isUpgradeRequest] is true, only WebSocket routes are checked.
+  RouteMatchResult match(String method, String path,
+      {bool isUpgradeRequest = false}) {
     final normalizedPath = _normalizePath(path);
+
+    // WebSocket upgrade requests only match WS routes.
+    if (isUpgradeRequest) {
+      for (final wsRoute in _webSocketRoutes) {
+        final params = _matchPath(wsRoute.path, normalizedPath);
+        if (params != null) {
+          return MatchedWebSocket(route: wsRoute, params: params);
+        }
+      }
+      return NotFound();
+    }
+
+    final normalizedMethod = method.toUpperCase();
 
     // HEAD falls back to GET routes (HTTP spec requirement).
     final lookupMethods =
