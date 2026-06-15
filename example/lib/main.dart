@@ -1,84 +1,69 @@
+import 'dart:io';
+
 import 'package:quadrant_server/quadrant_server.dart';
 
-// ─── Room Registry ───────────────────────────────────────────
-
-/// Tracks all connected clients per room.
-/// Key = roomId, Value = set of connected WebSocket contexts.
-final Map<String, Set<WebSocketContext>> _rooms = {};
-
-void _joinRoom(String roomId, WebSocketContext ctx) {
-  _rooms.putIfAbsent(roomId, () => {}).add(ctx);
-}
-
-void _leaveRoom(String roomId, WebSocketContext ctx) {
-  _rooms[roomId]?.remove(ctx);
-  if (_rooms[roomId]?.isEmpty ?? false) {
-    _rooms.remove(roomId);
-  }
-}
-
-/// Sends [message] to all clients in [roomId] except [sender].
-void _broadcast(String roomId, Object message, {WebSocketContext? sender}) {
-  final members = _rooms[roomId] ?? {};
-  for (final member in members) {
-    if (member != sender) {
-      member.send(message);
-    }
-  }
-}
-
-// ─── WebSocket Callbacks ─────────────────────────────────────
-
-Future<void> chatOnStart(WebSocketContext ctx) async {
-  final room = ctx.request.params['roomId'] ?? 'general';
-  _joinRoom(room, ctx);
-  ctx.send('Welcome to room: $room (${_rooms[room]?.length ?? 0} online)');
-  _broadcast(room, '** A new user joined the room **', sender: ctx);
-}
-
-Future<void> chatOnMessage(WebSocketContext ctx, dynamic data) async {
-  final room = ctx.request.params['roomId'] ?? 'general';
-  // Broadcast message to everyone else in the room.
-  _broadcast(room, data, sender: ctx);
-}
-
-Future<void> chatOnClose(
-  WebSocketContext ctx,
-  int? code,
-  String? reason,
-) async {
-  final room = ctx.request.params['roomId'] ?? 'general';
-  _leaveRoom(room, ctx);
-  _broadcast(room, '** A user left the room **');
-  print('User left room "$room" — code: $code, reason: $reason');
-}
-
-Future<void> chatOnError(WebSocketContext ctx, Object error) async {
-  print('WebSocket error: $error');
-}
-
-// ─── HTTP Handlers ───────────────────────────────────────────
-
-Future<Response> getHello(Request req) async {
-  final name = req.params['name'] ?? 'World';
-  return Response.ok({'message': 'Hello, $name!'});
-}
-
-Future<Response> getHealth(Request req) async {
-  return Response.ok({'status': 'ok'});
-}
-
-// ─── Server ──────────────────────────────────────────────────
+import 'handlers/chat.dart';
+import 'handlers/system.dart';
+import 'handlers/users.dart';
+import 'middlewares/auth.dart';
 
 void main() async {
+  // ─── Port from environment (useful for Docker) ──────────────
+  final port = int.tryParse(Platform.environment['PORT'] ?? '') ?? 5050;
+
+  // ─── API v1 router ───────────────────────────────────────────
+  //
+  // QuadrantRouter groups all routes under a shared prefix,
+  // avoiding repetition and making versioning trivial.
+
+  final apiV1 = QuadrantRouter(prefix: '/api/v1')
+    // System
+    ..get('/info', getInfo)
+    ..post('/echo', echo)
+    // Users — full CRUD
+    ..get('/users', getUsers)
+    ..post('/users', createUser, middlewares: [requireAuth()])
+    ..get('/users/:id', getUser)
+    ..put('/users/:id', updateUser, middlewares: [requireAuth()])
+    ..patch('/users/:id', patchUser, middlewares: [requireAuth()])
+    ..delete('/users/:id', deleteUserImpl,
+        middlewares: [requireAuth(), requireAdmin()])
+    // Catch-all — any unmatched sub-path under /api/v1
+    ..get('/unknown/*', notFoundFallback);
+
+  // ─── Server ──────────────────────────────────────────────────
+
   final app = QuadrantServer(
-    middlewares: [cors(), logger(), bodyParser()],
-    routes: [
-      Route.get(path: '/hello/:name', handler: getHello),
-      Route.get(path: '/health', handler: getHealth),
+    // Global middlewares — run on every request before route handlers.
+    middlewares: [
+      cors(origin: '*'),      // CORS — set a real origin in production
+      logger(),               // Logs: METHOD /path → STATUS (Xms)
+      bodyParser(),           // Parses JSON bodies into req.body
     ],
+
+    routes: [
+      // Redirect legacy /api → /api/v1/info
+      Route.get(path: '/api', handler: redirectToV1),
+
+      // Health check — no auth, no versioning prefix
+      Route.get(path: '/health', handler: getHealth),
+
+      // Mount the versioned API router
+      ...apiV1.routes,
+    ],
+
     webSocketRoutes: [
-      // Chat room — connect via ws://localhost:5050/ws/chat/general
+      // ── Chat rooms ──────────────────────────────────────────
+      //
+      // Connect via: ws://localhost:<PORT>/ws/chat/<roomId>
+      //
+      // Supported messages:
+      //   {"name": "Alice"}   → sets display name
+      //   "hello world"       → broadcasts as plain chat message
+      //   {"text": "..."}     → broadcasts as structured JSON message
+      //
+      // Events sent by server:
+      //   welcome, user_joined, user_left, user_renamed, message
       WebSocketRoute(
         path: '/ws/chat/:roomId',
         onStart: chatOnStart,
@@ -86,12 +71,70 @@ void main() async {
         onClose: chatOnClose,
         onError: chatOnError,
       ),
+
+      // ── Ping / echo ─────────────────────────────────────────
+      //
+      // Connect via: ws://localhost:<PORT>/ws/ping
+      // Send any message → receive {"event":"pong","echo":...,"ts":...}
+      WebSocketRoute(
+        path: '/ws/ping',
+        onMessage: pingOnMessage,
+      ),
     ],
+
+    // Enable the built-in Swagger UI explorer.
+    // Visit http://localhost:<PORT>/quadrant_docs
     docs: true,
+    docsLocalOnly: false, // Set to true in production
+    onError: (error, req) {
+      // Centralised error handler.
+      // Log the real error server-side, return a safe message to the client.
+      // ignore: avoid_print
+      print('[ERROR] ${req.method} ${req.path} — $error');
+      return Response.internalServerError('Something went wrong');
+    },
   );
 
-  final server = await app.listen(port: 5050);
-  print('QuadrantServer running on http://localhost:${server.port}');
-  print('WebSocket: ws://localhost:${server.port}/ws/chat/<roomId>');
-  print('Docs: http://localhost:${server.port}/quadrant_docs');
+  // ─── Start ───────────────────────────────────────────────────
+
+  await app.listen(port: port);
+
+  // ignore: avoid_print
+  print('');
+  // ignore: avoid_print
+  print('REST:');
+  // ignore: avoid_print
+  print('  GET    http://localhost:$port/health');
+  // ignore: avoid_print
+  print('  GET    http://localhost:$port/api/v1/users');
+  // ignore: avoid_print
+  print('  POST   http://localhost:$port/api/v1/users');
+  // ignore: avoid_print
+  print('  GET    http://localhost:$port/api/v1/users/:id');
+  // ignore: avoid_print
+  print('  PUT    http://localhost:$port/api/v1/users/:id');
+  // ignore: avoid_print
+  print('  PATCH  http://localhost:$port/api/v1/users/:id');
+  // ignore: avoid_print
+  print('  DELETE http://localhost:$port/api/v1/users/:id');
+  // ignore: avoid_print
+  print('  POST   http://localhost:$port/api/v1/echo');
+  // ignore: avoid_print
+  print('');
+  // ignore: avoid_print
+  print('WebSocket:');
+  // ignore: avoid_print
+  print('  ws://localhost:$port/ws/chat/<roomId>');
+  // ignore: avoid_print
+  print('  ws://localhost:$port/ws/ping');
+  // ignore: avoid_print
+  print('');
+  // ignore: avoid_print
+  print('Auth tokens for protected routes:');
+  // ignore: avoid_print
+  print('  Bearer secret-admin-token  (admin)');
+  // ignore: avoid_print
+  print('  Bearer secret-user-token   (user)');
+  // ignore: avoid_print
+  print('');
 }

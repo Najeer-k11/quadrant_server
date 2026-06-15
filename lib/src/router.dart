@@ -2,7 +2,7 @@
 // router.dart — QuadrantServer Route Matching Implementation
 // ============================================================
 //
-// IMPROVEMENTS OVER NAIVE LINEAR SCAN:
+// FEATURES:
 //
 // 1. O(n/m) lookup — routes grouped by HTTP method
 // 2. Method normalization — 'get' and 'GET' both work
@@ -10,6 +10,8 @@
 // 4. Trailing slash normalization — '/users/' == '/users'
 // 5. 405 Method Not Allowed — distinguishes "wrong method" from "not found"
 // 6. URI-decoded params — '%20' in path segments decoded automatically
+// 7. Wildcard segments — '/files/*' matches '/files/a/b/c'
+//    Captured as params['*'] = 'a/b/c'
 //
 // ============================================================
 
@@ -149,10 +151,42 @@ class Router {
   ///
   /// Returns a params map on success: {'id': '42'}
   /// Returns null if the path does not match the pattern.
+  ///
+  /// Supports:
+  /// - Static segments: `/users`
+  /// - Named params: `/users/:id` → `{'id': '42'}`
+  /// - Wildcards: `/files/*` → `{'*': 'a/b/c'}` (matches remaining path)
   Map<String, String>? _matchPath(String pattern, String path) {
     final patternSegments = _segments(pattern);
     final pathSegments = _segments(path);
 
+    // Check for wildcard at the end of the pattern.
+    final hasWildcard =
+        patternSegments.isNotEmpty && patternSegments.last == '*';
+
+    if (hasWildcard) {
+      // Pattern (without the '*') must be a prefix of the path.
+      final prefixLength = patternSegments.length - 1;
+      if (pathSegments.length < prefixLength) return null;
+
+      final params = <String, String>{};
+
+      for (var i = 0; i < prefixLength; i++) {
+        final p = patternSegments[i];
+        final s = pathSegments[i];
+        if (p.startsWith(':')) {
+          params[p.substring(1)] = Uri.decodeComponent(s);
+        } else if (p != s) {
+          return null;
+        }
+      }
+
+      // Capture the remaining path segments as the wildcard value.
+      params['*'] = pathSegments.skip(prefixLength).join('/');
+      return params;
+    }
+
+    // Non-wildcard: lengths must match exactly.
     if (patternSegments.length != pathSegments.length) return null;
 
     final params = <String, String>{};

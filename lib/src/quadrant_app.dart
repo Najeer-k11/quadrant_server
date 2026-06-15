@@ -41,10 +41,18 @@ class QuadrantServer {
   /// Whether the /quadrant_docs endpoint is enabled. Default: false.
   final bool docs;
 
+  /// When [docs] is true, restrict the docs endpoint to loopback addresses
+  /// only (127.0.0.1 / ::1). Default: true.
+  ///
+  /// Set to `false` only when you intentionally want docs accessible from
+  /// external IPs (e.g. a staging environment behind a firewall).
+  final bool docsLocalOnly;
+
   /// Optional global error handler. Returns a [Response].
   final ErrorHandler? onError;
 
   final Router _router;
+  HttpServer? _server;
 
   QuadrantServer({
     this.middlewares = const [],
@@ -52,21 +60,31 @@ class QuadrantServer {
     this.webSocketRoutes = const [],
     this.onError,
     this.docs = false,
+    this.docsLocalOnly = true,
   }) : _router = Router(
-          _buildRouteList(routes, docs, webSocketRoutes: webSocketRoutes),
+          _buildRouteList(routes, docs,
+              webSocketRoutes: webSocketRoutes, docsLocalOnly: true),
           webSocketRoutes: webSocketRoutes,
         );
 
   /// Builds the final route list, conditionally adding /quadrant_docs.
-  static List<Route> _buildRouteList(List<Route> routes, bool docs,
-      {List<WebSocketRoute> webSocketRoutes = const []}) {
+  static List<Route> _buildRouteList(
+    List<Route> routes,
+    bool docs, {
+    List<WebSocketRoute> webSocketRoutes = const [],
+    bool docsLocalOnly = true,
+  }) {
     if (!docs) return routes;
 
     return [
       ...routes,
       Route.get(
         path: '/quadrant_docs',
-        handler: docsHandler(routes, webSocketRoutes: webSocketRoutes),
+        handler: docsHandler(
+          routes,
+          webSocketRoutes: webSocketRoutes,
+          localOnly: docsLocalOnly,
+        ),
       ),
     ];
   }
@@ -75,29 +93,61 @@ class QuadrantServer {
   /// incoming requests.
   ///
   /// Optionally specify [address] (defaults to any IPv4).
+  ///
+  /// When [docs] is enabled, a startup banner is printed listing the server
+  /// URL and the docs endpoint.
   Future<HttpServer> listen({
     required int port,
     dynamic address = '0.0.0.0',
   }) async {
-    final server = await HttpServer.bind(address, port);
+    _server = await HttpServer.bind(address, port);
 
-    server.listen((httpRequest) async {
+    _server!.listen((httpRequest) async {
       await _handleRequest(httpRequest);
     });
 
-    return server;
+    if (docs) {
+      final host = 'http://localhost:$port';
+      // ignore: avoid_print
+      print('┌─────────────────────────────────────────┐');
+      // ignore: avoid_print
+      print('│         QuadrantServer v1.2.0            │');
+      // ignore: avoid_print
+      print('├─────────────────────────────────────────┤');
+      // ignore: avoid_print
+      print('│  Listening on  $host${' ' * (27 - host.length)}│');
+      // ignore: avoid_print
+      print('│  REST routes   ${routes.length} registered${' ' * (24 - routes.length.toString().length)}│');
+      // ignore: avoid_print
+      print(
+          '│  WS routes     ${webSocketRoutes.length} registered${' ' * (24 - webSocketRoutes.length.toString().length)}│');
+      // ignore: avoid_print
+      print('│  Docs          $host/quadrant_docs${' ' * (7 - '/quadrant_docs'.length + 14)}│');
+      // ignore: avoid_print
+      print('└─────────────────────────────────────────┘');
+    }
+
+    return _server!;
+  }
+
+  /// Gracefully shuts down the server.
+  ///
+  /// If [force] is `false` (default), waits for in-flight requests to
+  /// complete before closing. If `true`, closes immediately.
+  Future<void> close({bool force = false}) async {
+    await _server?.close(force: force);
+    _server = null;
   }
 
   /// Handles a single incoming [HttpRequest].
   Future<void> _handleRequest(HttpRequest httpRequest) async {
     Request request = Request.fromHttpRequest(httpRequest);
-    final requestHash = httpRequest.hashCode;
 
     try {
       // Detect WebSocket upgrade requests.
       final isUpgrade = WebSocketTransformer.isUpgradeRequest(httpRequest);
 
-      // Match route using the new sealed result type.
+      // Match route using the sealed result type.
       final result = _router.match(
         request.method,
         request.path,
@@ -120,19 +170,19 @@ class QuadrantServer {
           return;
 
         case Matched(:final route, :final params):
-          // Attach path params to request
+          // Attach path params to request.
           request = request.copyWith(params: params);
 
-          // Build middleware chain: [global] + [route-level] + [handler]
+          // Build middleware chain: [global] + [route-level] + [handler].
           final allMiddlewares = [...middlewares, ...route.middlewares];
 
-          // Execute the chain
+          // Execute the chain.
           final response = await _executeChain(
             allMiddlewares,
             0,
             request,
             route.handler,
-            requestHash,
+            httpRequest,
           );
 
           _writeResponse(httpRequest.response, response);
@@ -146,7 +196,7 @@ class QuadrantServer {
             wsRequest,
             middlewareChain,
             0,
-            requestHash,
+            httpRequest,
           );
 
           if (rejected != null) {
@@ -158,18 +208,24 @@ class QuadrantServer {
           try {
             final ctx = await WebSocketContext.fromUpgrade(wsRequest);
             await _handleWebSocket(ctx, route);
-          } catch (_) {
-            // Upgrade failed — dart:io closes the socket automatically.
+          } catch (error) {
+            // Upgrade failed — delegate to onError if provided.
+            if (onError != null) {
+              onError!(error, wsRequest);
+            } else {
+              // ignore: avoid_print
+              print('[QuadrantServer] WebSocket upgrade error: $error');
+            }
           }
       }
     } catch (error) {
       final response = onError != null
           ? onError!(error, request)
-          : Response.internalServerError(error.toString());
+          : Response.internalServerError('Internal server error');
       _writeResponse(httpRequest.response, response);
     } finally {
-      // Clean up any parsed body that wasn't consumed
-      RequestHolder.instance.consumeParsedBody(requestHash);
+      // Clean up any parsed body that was not consumed.
+      RequestHolder.instance.consumeParsedBody(httpRequest);
     }
   }
 
@@ -184,10 +240,10 @@ class QuadrantServer {
     int index,
     Request request,
     Handler handler,
-    int requestHash,
+    HttpRequest rawRequest,
   ) async {
-    // Check if bodyParser has stored a parsed body for this request
-    final parsedBody = RequestHolder.instance.consumeParsedBody(requestHash);
+    // Check if bodyParser has stored a parsed body for this request.
+    final parsedBody = RequestHolder.instance.consumeParsedBody(rawRequest);
     if (parsedBody != null) {
       request = request.copyWith(body: parsedBody);
     }
@@ -199,8 +255,8 @@ class QuadrantServer {
     final middleware = middlewareList[index];
 
     return middleware(request, () async {
-      // After this middleware runs, check for parsed body again
-      final body = RequestHolder.instance.consumeParsedBody(requestHash);
+      // After this middleware runs, check for parsed body again.
+      final body = RequestHolder.instance.consumeParsedBody(rawRequest);
       final updatedRequest =
           body != null ? request.copyWith(body: body) : request;
       return _executeChain(
@@ -208,7 +264,7 @@ class QuadrantServer {
         index + 1,
         updatedRequest,
         handler,
-        requestHash,
+        rawRequest,
       );
     });
   }
@@ -221,10 +277,10 @@ class QuadrantServer {
     Request request,
     List<Middleware> middlewareList,
     int index,
-    int requestHash,
+    HttpRequest rawRequest,
   ) async {
-    // Check if bodyParser has stored a parsed body for this request
-    final parsedBody = RequestHolder.instance.consumeParsedBody(requestHash);
+    // Check if bodyParser has stored a parsed body for this request.
+    final parsedBody = RequestHolder.instance.consumeParsedBody(rawRequest);
     if (parsedBody != null) {
       request = request.copyWith(body: parsedBody);
     }
@@ -243,14 +299,14 @@ class QuadrantServer {
 
     final response = await middleware(request, () async {
       nextCalled = true;
-      final body = RequestHolder.instance.consumeParsedBody(requestHash);
+      final body = RequestHolder.instance.consumeParsedBody(rawRequest);
       final updatedRequest =
           body != null ? request.copyWith(body: body) : request;
       chainResult = await _runMiddlewareChainForUpgrade(
         updatedRequest,
         middlewareList,
         index + 1,
-        requestHash,
+        rawRequest,
       );
       // Return a dummy response — the actual result is in chainResult.
       return Response(statusCode: 200);
@@ -284,12 +340,14 @@ class QuadrantServer {
       onError: (Object error) async {
         if (route.onError != null) {
           await route.onError!(ctx, error);
+        } else {
+          // ignore: avoid_print
+          print('[QuadrantServer] WebSocket error on ${ctx.request.path}: $error');
         }
       },
       onDone: () async {
         if (route.onClose != null) {
-          await route.onClose!(
-              ctx, ctx.socket.closeCode, ctx.socket.closeReason);
+          await route.onClose!(ctx, ctx.socket.closeCode, ctx.socket.closeReason);
         }
         completer.complete();
       },

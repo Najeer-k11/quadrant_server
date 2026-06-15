@@ -7,16 +7,24 @@ import 'websocket_route.dart';
 
 /// Returns a [Handler] that serves the Swagger UI docs page.
 ///
-/// Only responds to loopback requests. External IPs get a 404.
 /// [routes] must be the user's original route list (excludes /quadrant_docs).
 /// [webSocketRoutes] are rendered in a separate section below Swagger UI.
-Handler docsHandler(List<Route> routes,
-    {List<WebSocketRoute> webSocketRoutes = const []}) {
+///
+/// When [localOnly] is true (default), only loopback requests (127.0.0.1 /
+/// ::1) are served. External IPs receive a 404. Set to `false` only in
+/// environments where external access is intentional (e.g. behind a firewall).
+Handler docsHandler(
+  List<Route> routes, {
+  List<WebSocketRoute> webSocketRoutes = const [],
+  bool localOnly = true,
+}) {
   return (Request req) async {
-    // final ip = req.raw.connectionInfo?.remoteAddress;
-    // if (ip == null || !ip.isLoopback) {
-    //   return Response.notFound('Route not found');
-    // }
+    if (localOnly) {
+      final ip = req.raw.connectionInfo?.remoteAddress;
+      if (ip == null || !ip.isLoopback) {
+        return Response.notFound('Route not found');
+      }
+    }
 
     final routeData = routes
         .map((r) => <String, dynamic>{

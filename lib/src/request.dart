@@ -19,8 +19,11 @@ class Request {
   /// Request headers
   final Map<String, String> headers;
 
-  /// Parsed JSON body. Empty map by default, populated by bodyParser().
-  final Map<String, dynamic> body;
+  /// Parsed JSON body. `null` by default, populated by bodyParser().
+  ///
+  /// May be a [Map<String, dynamic>] for JSON objects or a [List] for JSON
+  /// arrays. Cast accordingly, or use [bodyAsMap] / [bodyAsList] helpers.
+  final dynamic body;
 
   /// Escape hatch to the underlying dart:io [HttpRequest].
   final HttpRequest raw;
@@ -31,7 +34,7 @@ class Request {
     required this.params,
     required this.query,
     required this.headers,
-    required this.body,
+    this.body,
     required this.raw,
   });
 
@@ -49,7 +52,7 @@ class Request {
       params: {},
       query: uri.queryParameters,
       headers: headers,
-      body: {},
+      body: null,
       raw: httpRequest,
     );
   }
@@ -61,7 +64,8 @@ class Request {
     Map<String, String>? params,
     Map<String, String>? query,
     Map<String, String>? headers,
-    Map<String, dynamic>? body,
+    dynamic body,
+    bool clearBody = false,
   }) {
     return Request(
       method: method ?? this.method,
@@ -69,8 +73,52 @@ class Request {
       params: params ?? this.params,
       query: query ?? this.query,
       headers: headers ?? this.headers,
-      body: body ?? this.body,
+      body: clearBody ? null : (body ?? this.body),
       raw: raw,
     );
+  }
+
+  // ─── Typed body helpers ──────────────────────────────────────
+
+  /// Returns the body as a [Map<String, dynamic>], or null if absent / wrong type.
+  Map<String, dynamic>? get bodyAsMap =>
+      body is Map<String, dynamic> ? body as Map<String, dynamic> : null;
+
+  /// Returns the body as a [List<dynamic>], or null if absent / wrong type.
+  List<dynamic>? get bodyAsList => body is List<dynamic> ? body as List<dynamic> : null;
+
+  // ─── Typed query helpers ─────────────────────────────────────
+
+  /// Returns a query parameter as a [String], or [defaultValue] if absent.
+  String queryString(String key, {String defaultValue = ''}) =>
+      query[key] ?? defaultValue;
+
+  /// Returns a query parameter parsed as [int], or [defaultValue] if absent
+  /// or not parseable.
+  int? queryInt(String key, {int? defaultValue}) {
+    final raw = query[key];
+    if (raw == null) return defaultValue;
+    return int.tryParse(raw) ?? defaultValue;
+  }
+
+  /// Returns a query parameter parsed as [double], or [defaultValue] if absent
+  /// or not parseable.
+  double? queryDouble(String key, {double? defaultValue}) {
+    final raw = query[key];
+    if (raw == null) return defaultValue;
+    return double.tryParse(raw) ?? defaultValue;
+  }
+
+  /// Returns a query parameter parsed as [bool].
+  ///
+  /// `'true'`, `'1'`, `'yes'` → `true`.
+  /// `'false'`, `'0'`, `'no'` → `false`.
+  /// Anything else → [defaultValue].
+  bool? queryBool(String key, {bool? defaultValue}) {
+    final raw = query[key]?.toLowerCase();
+    if (raw == null) return defaultValue;
+    if (raw == 'true' || raw == '1' || raw == 'yes') return true;
+    if (raw == 'false' || raw == '0' || raw == 'no') return false;
+    return defaultValue;
   }
 }
