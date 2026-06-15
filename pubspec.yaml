@@ -1,15 +1,20 @@
 name: quadrant_server
 description: A Dart-first, batteries-included HTTP server framework built on dart:io with zero external dependencies.
-version: 1.1.1
+version: 2.0.0
 homepage: https://github.com/Najeer-k11/quadrant_server
 repository: https://github.com/Najeer-k11/quadrant_server
 issue_tracker: https://github.com/Najeer-k11/quadrant_server/issues
 topics:
   - server
   - http
+  - websocket
   - framework
   - backend
   - dart-io
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^3.0.0

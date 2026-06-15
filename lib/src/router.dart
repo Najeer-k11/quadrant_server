@@ -2,7 +2,7 @@
 // router.dart — QuadrantServer Route Matching Implementation
 // ============================================================
 //
-// IMPROVEMENTS OVER NAIVE LINEAR SCAN:
+// FEATURES:
 //
 // 1. O(n/m) lookup — routes grouped by HTTP method
 // 2. Method normalization — 'get' and 'GET' both work
@@ -10,10 +10,13 @@
 // 4. Trailing slash normalization — '/users/' == '/users'
 // 5. 405 Method Not Allowed — distinguishes "wrong method" from "not found"
 // 6. URI-decoded params — '%20' in path segments decoded automatically
+// 7. Wildcard segments — '/files/*' matches '/files/a/b/c'
+//    Captured as params['*'] = 'a/b/c'
 //
 // ============================================================
 
 import 'route.dart';
+import 'websocket_route.dart';
 
 // ─── Normalize path helper ───────────────────────────────────
 
@@ -53,6 +56,14 @@ class MethodNotAllowed extends RouteMatchResult {
 /// Server should respond 404.
 class NotFound extends RouteMatchResult {}
 
+/// WebSocket route matched — ready to upgrade.
+class MatchedWebSocket extends RouteMatchResult {
+  final WebSocketRoute route;
+  final Map<String, String> params;
+
+  MatchedWebSocket({required this.route, required this.params});
+}
+
 // ─── Router ──────────────────────────────────────────────────
 
 /// Internal router. Groups routes by HTTP method for fast lookup.
@@ -64,7 +75,11 @@ class Router {
   /// Flat list for MethodNotAllowed lookup.
   final List<Route> _allRoutes = [];
 
-  Router(List<Route> routes) {
+  /// WebSocket routes for upgrade requests.
+  final List<WebSocketRoute> _webSocketRoutes;
+
+  Router(List<Route> routes, {List<WebSocketRoute> webSocketRoutes = const []})
+      : _webSocketRoutes = webSocketRoutes {
     for (final route in routes) {
       final method = route.method.toUpperCase();
       _routesByMethod.putIfAbsent(method, () => []).add(route);
@@ -73,10 +88,25 @@ class Router {
   }
 
   /// Match an incoming [method] + [path] against registered routes.
-  /// Returns [Matched], [MethodNotAllowed], or [NotFound].
-  RouteMatchResult match(String method, String path) {
-    final normalizedMethod = method.toUpperCase();
+  /// Returns [Matched], [MatchedWebSocket], [MethodNotAllowed], or [NotFound].
+  ///
+  /// When [isUpgradeRequest] is true, only WebSocket routes are checked.
+  RouteMatchResult match(String method, String path,
+      {bool isUpgradeRequest = false}) {
     final normalizedPath = _normalizePath(path);
+
+    // WebSocket upgrade requests only match WS routes.
+    if (isUpgradeRequest) {
+      for (final wsRoute in _webSocketRoutes) {
+        final params = _matchPath(wsRoute.path, normalizedPath);
+        if (params != null) {
+          return MatchedWebSocket(route: wsRoute, params: params);
+        }
+      }
+      return NotFound();
+    }
+
+    final normalizedMethod = method.toUpperCase();
 
     // HEAD falls back to GET routes (HTTP spec requirement).
     final lookupMethods =
@@ -121,10 +151,42 @@ class Router {
   ///
   /// Returns a params map on success: {'id': '42'}
   /// Returns null if the path does not match the pattern.
+  ///
+  /// Supports:
+  /// - Static segments: `/users`
+  /// - Named params: `/users/:id` → `{'id': '42'}`
+  /// - Wildcards: `/files/*` → `{'*': 'a/b/c'}` (matches remaining path)
   Map<String, String>? _matchPath(String pattern, String path) {
     final patternSegments = _segments(pattern);
     final pathSegments = _segments(path);
 
+    // Check for wildcard at the end of the pattern.
+    final hasWildcard =
+        patternSegments.isNotEmpty && patternSegments.last == '*';
+
+    if (hasWildcard) {
+      // Pattern (without the '*') must be a prefix of the path.
+      final prefixLength = patternSegments.length - 1;
+      if (pathSegments.length < prefixLength) return null;
+
+      final params = <String, String>{};
+
+      for (var i = 0; i < prefixLength; i++) {
+        final p = patternSegments[i];
+        final s = pathSegments[i];
+        if (p.startsWith(':')) {
+          params[p.substring(1)] = Uri.decodeComponent(s);
+        } else if (p != s) {
+          return null;
+        }
+      }
+
+      // Capture the remaining path segments as the wildcard value.
+      params['*'] = pathSegments.skip(prefixLength).join('/');
+      return params;
+    }
+
+    // Non-wildcard: lengths must match exactly.
     if (patternSegments.length != pathSegments.length) return null;
 
     final params = <String, String>{};

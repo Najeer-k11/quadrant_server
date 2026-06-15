@@ -4,10 +4,14 @@
 library quadrant_server;
 
 export 'src/quadrant_app.dart';
+export 'src/quadrant_router.dart';
 export 'src/middleware.dart';
 export 'src/request.dart';
 export 'src/response.dart';
 export 'src/route.dart';
+export 'src/websocket_context.dart';
+export 'src/websocket_group.dart';
+export 'src/websocket_route.dart';
 export 'src/middlewares/cors.dart';
 export 'src/middlewares/logger.dart';
 export 'src/middlewares/body_parser.dart';

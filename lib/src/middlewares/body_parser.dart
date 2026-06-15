@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import '../middleware.dart';
 import '../request.dart';
@@ -6,9 +7,10 @@ import '../response.dart';
 
 /// Body parser middleware. Reads the request body stream, JSON-decodes it,
 /// and makes the parsed body available to downstream middlewares and handlers
-/// via the [RequestHolder] in the Apex chain runner.
+/// via the [RequestHolder] in the middleware chain runner.
 ///
-/// Only parses if Content-Type contains application/json.
+/// Parses if Content-Type contains application/json.
+/// Supports both top-level JSON objects (`Map`) and arrays (`List`).
 Middleware bodyParser() {
   return (Request req, Next next) async {
     final contentType = req.headers['content-type'] ?? '';
@@ -18,10 +20,11 @@ Middleware bodyParser() {
         final bodyString = await utf8.decoder.bind(req.raw).join();
         if (bodyString.isNotEmpty) {
           final decoded = jsonDecode(bodyString);
-          if (decoded is Map<String, dynamic>) {
-            // Store the parsed body on the RequestHolder so downstream
-            // middlewares and the handler can access it.
-            RequestHolder.instance.setParsedBody(req.raw.hashCode, decoded);
+          if (decoded is Map<String, dynamic> || decoded is List<dynamic>) {
+            // Store the parsed body so downstream middlewares and the handler
+            // can access it. Keyed on the HttpRequest object itself via
+            // Expando — true identity, zero hash-collision risk.
+            RequestHolder.instance.setParsedBody(req.raw, decoded as Object);
           }
         }
       } catch (_) {
@@ -36,18 +39,24 @@ Middleware bodyParser() {
 /// Holds parsed request bodies so they can be propagated through the
 /// middleware chain without mutating the immutable [Request].
 ///
+/// Uses [Expando] keyed on the [HttpRequest] object for guaranteed identity
+/// (no hash-collision risk under concurrent load).
+///
 /// This is an internal mechanism — not part of the public API.
 class RequestHolder {
   RequestHolder._();
   static final instance = RequestHolder._();
 
-  final Map<int, Map<String, dynamic>> _bodies = {};
+  /// Expando keyed on HttpRequest — identity-safe, no hash collisions.
+  final Expando<Object> _bodies = Expando('quadrant_body');
 
-  void setParsedBody(int hash, Map<String, dynamic> body) {
-    _bodies[hash] = body;
+  void setParsedBody(HttpRequest req, Object body) {
+    _bodies[req] = body;
   }
 
-  Map<String, dynamic>? consumeParsedBody(int hash) {
-    return _bodies.remove(hash);
+  Object? consumeParsedBody(HttpRequest req) {
+    final body = _bodies[req];
+    _bodies[req] = null;
+    return body;
   }
 }
