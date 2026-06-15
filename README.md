@@ -63,7 +63,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  quadrant_server: ^1.3.0
+  quadrant_server: ^2.0.0
 ```
 
 Then run:
