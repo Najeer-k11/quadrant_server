@@ -8,8 +8,8 @@ import 'package:test/test.dart';
 
 Future<Response> _ok(Request req) async => Response.ok({'ok': true});
 Future<Response> _echo(Request req) async => Response.ok({'id': req.params['id']});
-Future<Response> _bodyEcho(Request req) async => Response.ok(req.bodyAsMap ?? {});
-Future<Response> _listEcho(Request req) async => Response.ok(req.bodyAsList ?? []);
+// Future<Response> _bodyEcho(Request req) async => Response.ok(req.bodyAsMap ?? {});
+// Future<Response> _listEcho(Request req) async => Response.ok(req.bodyAsList ?? []);
 
 // ─── Tests ───────────────────────────────────────────────────
 
