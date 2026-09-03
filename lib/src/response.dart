@@ -8,10 +8,19 @@ class Response {
   final Map<String, String> headers;
   final String body;
 
+  /// `Set-Cookie` values. Each entry becomes a separate `Set-Cookie` header.
+  ///
+  /// Use [withCookie] to add cookies in a non-mutating way:
+  /// ```dart
+  /// return Response.ok(data).withCookie('session', token, httpOnly: true);
+  /// ```
+  final List<String> cookies;
+
   const Response({
     required this.statusCode,
     this.headers = const {},
     this.body = '',
+    this.cookies = const [],
   });
 
   // ─── Success ─────────────────────────────────────────────────
@@ -31,8 +40,13 @@ class Response {
   ///
   /// [location] is the target URL. [statusCode] defaults to 302.
   factory Response.redirect(String location, {int statusCode = 302}) {
-    assert(statusCode == 301 || statusCode == 302 || statusCode == 307 || statusCode == 308,
-        'Redirect status code must be 301, 302, 307, or 308.');
+    if (statusCode != 301 &&
+        statusCode != 302 &&
+        statusCode != 307 &&
+        statusCode != 308) {
+      throw ArgumentError.value(
+          statusCode, 'statusCode', 'Must be 301, 302, 307, or 308.');
+    }
     return Response(
       statusCode: statusCode,
       headers: {'location': location},
@@ -92,6 +106,55 @@ class Response {
       headers: {'content-type': 'text/html; charset=utf-8'},
       body: html,
     );
+  }
+
+  // ─── Cookie helper ───────────────────────────────────────────
+
+  /// Returns a new [Response] with a `Set-Cookie` header appended.
+  ///
+  /// Multiple cookies can be set by chaining calls:
+  /// ```dart
+  /// return Response.ok(data)
+  ///     .withCookie('session', token, httpOnly: true, sameSite: 'Strict')
+  ///     .withCookie('lang', 'en');
+  /// ```
+  ///
+  /// [name] / [value] — the cookie name and value (will be URL-encoded if needed).
+  /// [maxAge] — cookie lifetime. Omit for a session cookie.
+  /// [path] — cookie path. Defaults to `'/'`.
+  /// [domain] — cookie domain. Omit to use the request host.
+  /// [httpOnly] — prevents JavaScript access. Default: `true`.
+  /// [secure] — send only over HTTPS. Default: `false`.
+  /// [sameSite] — `'Strict'`, `'Lax'`, or `'None'`. Default: `'Lax'`.
+  Response withCookie(
+    String name,
+    String value, {
+    Duration? maxAge,
+    String path = '/',
+    String? domain,
+    bool httpOnly = true,
+    bool secure = false,
+    String sameSite = 'Lax',
+  }) {
+    final buf = StringBuffer('$name=${Uri.encodeComponent(value)}');
+    if (maxAge != null) buf.write('; Max-Age=${maxAge.inSeconds}');
+    buf.write('; Path=$path');
+    if (domain != null) buf.write('; Domain=$domain');
+    if (httpOnly) buf.write('; HttpOnly');
+    if (secure) buf.write('; Secure');
+    buf.write('; SameSite=$sameSite');
+
+    return Response(
+      statusCode: statusCode,
+      headers: headers,
+      body: body,
+      cookies: [...cookies, buf.toString()],
+    );
+  }
+
+  /// Returns a new [Response] that clears a cookie by setting `Max-Age=0`.
+  Response clearCookie(String name, {String path = '/'}) {
+    return withCookie(name, '', maxAge: Duration.zero, path: path);
   }
 
   // ─── Internal ────────────────────────────────────────────────

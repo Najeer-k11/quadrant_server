@@ -11,14 +11,34 @@ import '../response.dart';
 ///
 /// Parses if Content-Type contains application/json.
 /// Supports both top-level JSON objects (`Map`) and arrays (`List`).
-Middleware bodyParser() {
+///
+/// [maxBodyBytes] — maximum number of bytes to read from the request body.
+/// Requests exceeding this limit receive a `413 Payload Too Large` response.
+/// Defaults to 1 MB (1,048,576 bytes). Set to `0` to disable the limit.
+Middleware bodyParser({int maxBodyBytes = 1048576}) {
   return (Request req, Next next) async {
     final contentType = req.headers['content-type'] ?? '';
 
     if (contentType.contains('application/json')) {
       try {
-        final bodyString = await utf8.decoder.bind(req.raw).join();
-        if (bodyString.isNotEmpty) {
+        // Stream the body, counting bytes to enforce the size limit.
+        final bodyBytes = <int>[];
+        await for (final chunk in req.raw) {
+          bodyBytes.addAll(chunk);
+          if (maxBodyBytes > 0 && bodyBytes.length > maxBodyBytes) {
+            // Drain the remaining data so the socket stays clean.
+            req.raw.drain<void>().ignore();
+            return Response(
+              statusCode: 413,
+              headers: {'content-type': 'application/json'},
+              body:
+                  '{"error":"Payload Too Large","maxBytes":$maxBodyBytes}',
+            );
+          }
+        }
+
+        if (bodyBytes.isNotEmpty) {
+          final bodyString = utf8.decode(bodyBytes);
           final decoded = jsonDecode(bodyString);
           if (decoded is Map<String, dynamic> || decoded is List<dynamic>) {
             // Store the parsed body so downstream middlewares and the handler
@@ -27,9 +47,12 @@ Middleware bodyParser() {
             RequestHolder.instance.setParsedBody(req.raw, decoded as Object);
           }
         }
-      } catch (_) {
+      } on FormatException {
+        // JSON parse / UTF-8 decode failure — client's fault.
         return Response.badRequest('Invalid JSON body');
       }
+      // Any other exception (e.g. socket error) propagates up to the
+      // framework's outer catch, which triggers the global error handler.
     }
 
     return next();

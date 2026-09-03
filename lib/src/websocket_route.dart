@@ -56,6 +56,23 @@ class WebSocketRoute {
   /// Called when a stream error occurs. Optional.
   final OnErrorCallback? onError;
 
+  /// Heartbeat interval for automatic ping/pong keepalive.
+  ///
+  /// When set, the server sends a WebSocket ping frame on this interval.
+  /// If the client does not respond with a pong within the same interval,
+  /// the connection is closed with code `1001 Going Away`.
+  ///
+  /// ```dart
+  /// WebSocketRoute(
+  ///   path: '/ws/live',
+  ///   heartbeat: Duration(seconds: 30),
+  ///   onMessage: (ctx, data) async { ... },
+  /// )
+  /// ```
+  ///
+  /// Set to `null` (default) to disable heartbeats.
+  final Duration? heartbeat;
+
   const WebSocketRoute({
     required this.path,
     required this.onMessage,
@@ -63,5 +80,6 @@ class WebSocketRoute {
     this.onStart,
     this.onClose,
     this.onError,
+    this.heartbeat,
   });
 }

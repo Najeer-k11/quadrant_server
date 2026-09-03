@@ -25,6 +25,19 @@ class Request {
   /// arrays. Cast accordingly, or use [bodyAsMap] / [bodyAsList] helpers.
   final dynamic body;
 
+  /// Arbitrary per-request context map.
+  ///
+  /// Middlewares may write typed values here (e.g. an authenticated user)
+  /// for downstream handlers to consume.
+  ///
+  /// ```dart
+  /// // In a middleware:
+  /// return next(req.copyWith(context: {...req.context, 'user': user}));
+  /// // In a handler:
+  /// final user = req.context['user'] as MyUser;
+  /// ```
+  final Map<String, dynamic> context;
+
   /// Escape hatch to the underlying dart:io [HttpRequest].
   final HttpRequest raw;
 
@@ -35,6 +48,7 @@ class Request {
     required this.query,
     required this.headers,
     this.body,
+    this.context = const {},
     required this.raw,
   });
 
@@ -53,6 +67,7 @@ class Request {
       query: uri.queryParameters,
       headers: headers,
       body: null,
+      context: const {},
       raw: httpRequest,
     );
   }
@@ -66,6 +81,7 @@ class Request {
     Map<String, String>? headers,
     dynamic body,
     bool clearBody = false,
+    Map<String, dynamic>? context,
   }) {
     return Request(
       method: method ?? this.method,
@@ -74,6 +90,7 @@ class Request {
       query: query ?? this.query,
       headers: headers ?? this.headers,
       body: clearBody ? null : (body ?? this.body),
+      context: context ?? this.context,
       raw: raw,
     );
   }

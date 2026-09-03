@@ -9,16 +9,40 @@ A Dart-first, batteries-included HTTP server framework built directly on `dart:i
 
 - **Dart-first** — Named parameters, strong types, null safety
 - **Functional responses** — Handlers return `Response` objects, never mutate
-- **Declarative config** — Everything declared upfront in the `QuadrantServer()` constructor
-- **Zero dependencies** — Built only on `dart:io`
-- **Middleware system** — Global and route-level, with short-circuit support
-- **Path parameters** — `/users/:id` extracts `{'id': '123'}`
-- **Wildcard routes** — `/files/*` captures the full remaining path
+- **Declarative config** — Everything declared upfront in `QuadrantServer()`
+- **Zero dependencies** — Pure Dart (`dart:io` + `dart:async` only)
+- **Middleware system** — Global and route-level, short-circuiting, context propagation
+- **Path parameters & Wildcards** — `/users/:id` extracts `params['id']`, `/files/*` captures rest
 - **Route grouping** — `QuadrantRouter` for prefix-mounted route modules
-- **Built-in middlewares** — CORS, logger, and JSON body parser included
-- **WebSocket support** — Declare WS endpoints with the same style as REST routes
-- **WebSocketGroup** — Built-in broadcast/room utility for multi-client scenarios
-- **Auto-generated docs** — Swagger UI at `/quadrant_docs` (loopback-only by default)
+- **Built-in Middlewares (14 total)**:
+  - `cors()` — Cross-Origin Resource Sharing with preflight caching & `maxAge`
+  - `logger()` — Structured request logging with custom sinks
+  - `bodyParser()` — JSON parser with payload size limits (`413`)
+  - `rateLimit()` — Token-bucket sliding window rate limiting
+  - `bearerAuth()` — Bearer token authentication & principal injection
+  - `staticFiles()` — Path-traversal-safe file server with ETag & 304 caching
+  - `requestId()` — Automatic UUID v4 tracing & header propagation
+  - `helmet()` — 8 essential web security headers
+  - `timeout()` — Request cancellation with custom `408` timeout response
+  - `cookieParser()` — Parses `Cookie` header & provides cookie setters
+  - `formParser()` — Parses `application/x-www-form-urlencoded` forms
+  - `ipFilter()` — CIDR and exact IP allow/deny lists
+  - `compress()` — Gzip compression with `Accept-Encoding` negotiation
+  - `etag()` — Weak ETag caching and `If-None-Match` handling
+  - `multipartParser()` — File uploads & multipart form decoding
+- **Real-time**:
+  - **Server-Sent Events (`SseContext`)** — Event streaming with keep-alive pings
+  - **WebSockets (`WebSocketRoute`)** — Upgrades, callbacks, and automatic heartbeat ping/pong
+  - **`WebSocketGroup`** — Room/channel broadcasting utility
+- **Streaming Responses** — `StreamResponse` to pipe streams without buffering in memory
+- **Schema Validation** — `BodySchema` + `validate()` middleware for typed request validation (`422`)
+- **Operations & Security**:
+  - **HTTPS / TLS** — `listenSecure()` with certificate chains
+  - **Graceful shutdown** — `close()` drains in-flight requests cleanly
+  - **Health check** — Built-in `/health` endpoint reporting uptime, requests, and memory
+  - **Auto-generated docs** — Swagger UI at `/quadrant_docs` (loopback-only by default)
+
+---
 
 ## Quick Start
 
@@ -38,24 +62,34 @@ Future<Response> getUser(Request req) async {
 }
 
 Future<Response> createUser(Request req) async {
-  final body = req.bodyAsMap;          // Map<String, dynamic>? — safe cast
+  final body = req.bodyAsMap;
   return Response.created(body ?? {});
 }
 
 void main() async {
   final app = QuadrantServer(
-    middlewares: [cors(), logger(), bodyParser()],
+    middlewares: [
+      requestId(),
+      helmet(),
+      cors(),
+      logger(),
+      bodyParser(maxBodyBytes: 1024 * 1024), // 1MB limit
+    ],
     routes: [
       Route.get(path: '/users', handler: getUsers),
       Route.get(path: '/users/:id', handler: getUser),
       Route.post(path: '/users', handler: createUser),
     ],
+    healthCheck: true, // Enables GET /health
+    docs: true,        // Enables GET /quadrant_docs
   );
 
   await app.listen(port: 3000);
-  print('QuadrantServer running on http://localhost:3000');
+  print('Server running on http://localhost:3000');
 }
 ```
+
+---
 
 ## Installation
 
@@ -100,7 +134,7 @@ Route.get(path: '/files/*', handler: serveFile)
 Organise large apps into prefix-mounted modules without repeating path segments:
 
 ```dart
-final usersRouter = QuadrantRouter(prefix: '/api/v1')
+final apiRouter = QuadrantRouter(prefix: '/api/v1')
   ..get('/users', getUsers)
   ..post('/users', createUser)
   ..get('/users/:id', getUser)
@@ -109,7 +143,7 @@ final usersRouter = QuadrantRouter(prefix: '/api/v1')
 final app = QuadrantServer(
   middlewares: [cors(), logger()],
   routes: [
-    ...usersRouter.routes,
+    ...apiRouter.routes,
   ],
 );
 ```
@@ -119,10 +153,10 @@ Router-level middlewares run before every route in that router:
 ```dart
 final adminRouter = QuadrantRouter(
   prefix: '/admin',
-  middlewares: [auth()],   // runs before every admin route
+  middlewares: [bearerAuth(validate: myValidator)], // runs on all /admin routes
 )
-  ..get('/dashboard', dashboard)
-  ..get('/users', listUsers);
+  ..get('/dashboard', dashboardHandler)
+  ..get('/users', listUsersHandler);
 ```
 
 ### Request
@@ -136,9 +170,10 @@ Future<Response> handler(Request req) async {
   req.params;         // {'id': '123'} — path params
   req.query;          // {'page': '1'} — raw query string map
   req.headers;        // {'content-type': 'application/json'}
-  req.body;           // dynamic — null, Map, or List (requires bodyParser)
-  req.bodyAsMap;      // Map<String, dynamic>? — safe cast for JSON objects
-  req.bodyAsList;     // List? — safe cast for JSON arrays
+  req.body;           // dynamic — Map, List, or null
+  req.bodyAsMap;      // Map<String, dynamic>? — safe cast
+  req.bodyAsList;     // List? — safe cast
+  req.context;        // Map<String, dynamic> — middleware-injected data
   req.raw;            // dart:io HttpRequest escape hatch
 
   // Typed query helpers
@@ -169,111 +204,220 @@ Response.unprocessableEntity('message') // 422
 Response.internalServerError('msg')     // 500
 ```
 
-Maps and Lists are automatically JSON-encoded with `content-type: application/json`.
-Strings get `content-type: text/plain; charset=utf-8`.
+#### Setting & Clearing Cookies
 
-### Middleware
-
-A function that receives a `Request` and a `next()` callback:
+Use `.withCookie()` and `.clearCookie()`:
 
 ```dart
-Middleware auth() {
-  return (req, next) async {
-    final token = req.headers['authorization'];
-    if (token == null) return Response.unauthorized('Missing token');
-    return next(); // continue to handler
-  };
-}
-```
+return Response.ok({'status': 'logged_in'})
+    .withCookie(
+      'session_id',
+      token,
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Strict',
+      maxAge: Duration(days: 7),
+    )
+    .withCookie('theme', 'dark');
 
-Apply globally or per-route:
-
-```dart
-final app = QuadrantServer(
-  middlewares: [cors(), logger()],  // global
-  routes: [
-    Route.get(
-      path: '/admin',
-      handler: adminHandler,
-      middlewares: [auth()],  // route-level
-    ),
-  ],
-  docs: true,
-);
-```
-
-### Built-in Middlewares
-
-| Middleware     | Description |
-| -------------- | ----------- |
-| `cors()`       | Adds CORS headers. Accepts `origin`, `methods`, `allowedHeaders`. Sets `Vary: Origin` automatically when `origin != '*'`. |
-| `logger()`     | Logs method, path, status, and response time. Accepts optional `output` sink. |
-| `bodyParser()` | Parses JSON request bodies (objects and arrays) into `req.body`. |
-
-```dart
-// Custom logger sink
-logger(output: (line) => myLogger.info(line))
-
-// Specific CORS origin
-cors(origin: 'https://myapp.com')
-```
-
-### Error Handling
-
-```dart
-final app = QuadrantServer(
-  routes: [...],
-  onError: (error, req) {
-    // Log the real error server-side, return a safe message to the client.
-    print('Error: $error');
-    return Response.internalServerError('Something went wrong');
-  },
-);
+// Clearing a cookie:
+return Response.ok({}).clearCookie('session_id');
 ```
 
 ---
 
-## WebSocket Support
+## Middlewares Reference
 
-Declare WebSocket endpoints with `WebSocketRoute` — the same style as REST routes.
+| Middleware | Description | Key Options |
+|------------|-------------|-------------|
+| `helmet()` | Sets 8 standard HTTP security headers | `frameOptions`, `hsts`, `referrerPolicy` |
+| `requestId()` | Assigns/echoes UUID v4 tracing header & injects into context | `headerName`, `contextKey` |
+| `cors()` | Cross-Origin Resource Sharing with preflight cache | `origin`, `methods`, `allowedHeaders`, `maxAge` |
+| `rateLimit()` | Sliding-window rate limiting per IP or custom key | `maxRequests`, `window`, `keyExtractor` |
+| `bearerAuth()` | Bearer token auth; injects user into `req.context['user']` | `validate: (token) async => User?` |
+| `bodyParser()` | JSON body parser with size guard | `maxBodyBytes` (default: 1 MB) |
+| `formParser()` | Parses URL-encoded form submissions | `maxBodyBytes` (default: 64 KB) |
+| `multipartParser()` | Decodes file uploads & multipart fields into context | `maxFileSize` (default: 10 MB) |
+| `cookieParser()` | Parses `Cookie` header into `req.context['cookies']` | `contextKey` |
+| `ipFilter()` | Restricts access by exact IP or CIDR block | `allow: [...]` or `deny: [...]` |
+| `compress()` | Gzip response compression with Accept-Encoding check | `minBytes` (default: 512 B) |
+| `etag()` | Automatic weak ETag caching (`304 Not Modified`) | None |
+| `staticFiles()` | Serves directory safely with MIME & ETag caching | `rootDir`, `indexFallback` |
+| `timeout()` | Cancels slow requests with `408 Request Timeout` | `duration`, `onTimeout` |
+| `logger()` | Logs method, path, status, and response time | `output: (line) => ...` |
+
+---
+
+### Middleware Examples
+
+#### Security: `helmet()`, `requestId()`, `ipFilter()`
 
 ```dart
 final app = QuadrantServer(
-  routes: [...],
-  webSocketRoutes: [
-    WebSocketRoute(
-      path: '/ws/chat/:roomId',
-      onStart: (ctx) async {
-        ctx.sendJson({'event': 'welcome', 'room': ctx.request.params['roomId']});
-      },
-      onMessage: (ctx, data) async {
-        // data is String (text frame) or List<int> (binary frame)
-        ctx.send(data); // echo back
-      },
-      onClose: (ctx, code, reason) async {
-        print('Closed: $code $reason');
-      },
-      onError: (ctx, error) async {
-        print('Error: $error');
-      },
-    ),
+  middlewares: [
+    requestId(),
+    helmet(frameOptions: 'DENY'),
+    ipFilter(allow: ['127.0.0.1', '10.0.0.0/8']),
   ],
+  routes: [...],
 );
 ```
 
-Connect with: `ws://localhost:3000/ws/chat/general`
-
-### WebSocketContext
-
-The context object passed to every WebSocket callback:
+#### Authentication: `bearerAuth()`
 
 ```dart
-ctx.request         // original HTTP upgrade Request (params, query, headers)
-ctx.isOpen          // bool — check before sending
-ctx.isClosed        // bool
-ctx.send(data)      // send String or List<int>; no-op if closed
-ctx.sendJson(map)   // JSON-encodes and sends; no-op if closed
-ctx.close(1000, 'bye')
+final auth = bearerAuth(
+  validate: (token) async {
+    return await myAuthService.verify(token); // returns null on failure
+  },
+);
+
+Route.get(
+  path: '/me',
+  handler: (req) async {
+    final user = req.context['user'] as UserProfile;
+    return Response.ok({'id': user.id, 'name': user.name});
+  },
+  middlewares: [auth],
+);
+```
+
+#### Rate Limiting: `rateLimit()`
+
+```dart
+// 100 requests per minute globally:
+rateLimit(maxRequests: 100, window: Duration(minutes: 1))
+
+// Sensitive endpoint: 5 attempts per 15 minutes:
+Route.post(
+  path: '/auth/login',
+  handler: loginHandler,
+  middlewares: [rateLimit(maxRequests: 5, window: Duration(minutes: 15))],
+)
+```
+
+#### File Uploads: `multipartParser()`
+
+```dart
+Route.post(
+  path: '/upload',
+  handler: (req) async {
+    final files = req.context['files'] as List<UploadedFile>;
+    final fields = req.context['fields'] as Map<String, String>;
+
+    for (final file in files) {
+      print('Received: ${file.filename} (${file.size} bytes)');
+      await File('uploads/${file.filename}').writeAsBytes(file.bytes);
+    }
+
+    return Response.ok({'uploaded': files.length});
+  },
+  middlewares: [multipartParser(maxFileSize: 5 * 1024 * 1024)],
+)
+```
+
+---
+
+## Request Validation
+
+Create composable schemas and enforce them with `validate()`:
+
+```dart
+final userSchema = BodySchema({
+  'username': Field.string().minLength(3).maxLength(20).required(),
+  'email':    Field.string().email().required(),
+  'age':      Field.int_().min(18).max(120).required(),
+  'role':     Field.string().oneOf(['admin', 'member']).required(),
+  'tags':     Field.list().minItems(1),
+  'verified': Field.bool_(),
+});
+
+Route.post(
+  path: '/register',
+  handler: registerUser,
+  middlewares: [validate(userSchema)],
+)
+// Invalid requests automatically return 422 with a structured error map:
+// {"errors":{"email":"email must be a valid email address","age":"age must be ≥ 18"}}
+```
+
+---
+
+## Static Files
+
+Serve static directories safely with path traversal protection, MIME detection, ETag caching, and `index.html` fallback:
+
+```dart
+Route.get(path: '/public/*', handler: staticFiles('./public'))
+```
+
+---
+
+## Streaming Responses
+
+Use `StreamResponse` to stream large files or dynamic chunked data directly without buffering in memory:
+
+```dart
+Route.get(
+  path: '/download/:file',
+  handler: (req) async {
+    final file = File('storage/${req.params['file']}');
+    if (!await file.exists()) return Response.notFound('File not found');
+
+    return StreamResponse(
+      stream: file.openRead(),
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-length': '${await file.length()}',
+      },
+    );
+  },
+)
+```
+
+---
+
+## Real-Time
+
+### Server-Sent Events (SSE)
+
+Push-based event stream compatible with the browser's `EventSource` API:
+
+```dart
+Route.get(
+  path: '/events',
+  handler: (req) async {
+    final sse = await SseContext.from(req);
+
+    final timer = Timer.periodic(Duration(seconds: 1), (_) {
+      sse.send(data: 'ping', event: 'heartbeat');
+    });
+
+    await sse.done; // Wait for client disconnection
+    timer.cancel();
+    return sse.response;
+  },
+)
+```
+
+### WebSockets
+
+Declare WebSocket endpoints with lifecycle hooks and automatic ping/pong heartbeats:
+
+```dart
+WebSocketRoute(
+  path: '/ws/chat/:roomId',
+  heartbeat: Duration(seconds: 30), // auto ping/pong
+  onStart: (ctx) async {
+    ctx.sendJson({'event': 'connected'});
+  },
+  onMessage: (ctx, data) async {
+    ctx.send(data);
+  },
+  onClose: (ctx, code, reason) async {
+    print('Closed: $code');
+  },
+)
 ```
 
 ### WebSocketGroup — Rooms & Broadcasting
@@ -282,9 +426,7 @@ ctx.close(1000, 'bye')
 
 ```dart
 final rooms = <String, WebSocketGroup>{};
-
-WebSocketGroup _room(String id) =>
-    rooms.putIfAbsent(id, () => WebSocketGroup());
+WebSocketGroup _room(String id) => rooms.putIfAbsent(id, () => WebSocketGroup());
 
 WebSocketRoute(
   path: '/ws/chat/:roomId',
@@ -304,16 +446,33 @@ WebSocketRoute(
 )
 ```
 
-### WebSocket Middleware Guard
+---
 
-Middleware runs before the upgrade. A rejection prevents the connection:
+## HTTPS / TLS & Operations
+
+### HTTPS / TLS
 
 ```dart
-WebSocketRoute(
-  path: '/ws/secure',
-  middlewares: [auth()],   // rejects unauthenticated clients with HTTP 401
-  onMessage: (ctx, data) async { ... },
-)
+final app = QuadrantServer(routes: [...]);
+
+await app.listenSecure(
+  port: 443,
+  certificateChain: File('cert.pem'),
+  privateKey: File('key.pem'),
+);
+```
+
+### Health Check
+
+Enable `/health` for Kubernetes / load balancers:
+
+```dart
+final app = QuadrantServer(
+  healthCheck: true,
+  routes: [...],
+);
+// GET /health returns:
+// {"status":"ok","uptime":3600,"requests":1024,"memoryMb":38.4}
 ```
 
 ### Graceful Shutdown
@@ -321,12 +480,24 @@ WebSocketRoute(
 ```dart
 final server = await app.listen(port: 3000);
 
-// Later — wait for in-flight requests, then close.
+// Stops accepting new requests and drains all in-flight requests cleanly:
 await app.close();
+```
+
+### Error Handling
+
+```dart
+final app = QuadrantServer(
+  routes: [...],
+  onError: (error, req) {
+    print('Internal error on ${req.path}: $error');
+    return Response.internalServerError('Something went wrong');
+  },
+);
 ```
 
 ---
 
-## Real-World Example
+## License
 
-Check the [`example/`](example/) folder for a production-ready project structure including a `Dockerfile` for containerized deployment. It demonstrates REST routing with `QuadrantRouter`, wildcard file routes, WebSocket rooms using `WebSocketGroup`, middleware composition, and Docker-based deployment.
+MIT

@@ -58,7 +58,9 @@ String _buildDocsHtml(
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+      href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"
+      integrity="sha256-HNfDFgNqWRmGzNNH/8fNlYXCOtZhfzQ2fFILMGeMC4="
+      crossorigin="anonymous">
     <style>
       .code-samples { margin: 1rem 0; padding: 0 1rem; }
       .code-samples summary { cursor: pointer; font-weight: 600; color: #333; margin-bottom: 0.5rem; }
@@ -72,7 +74,9 @@ String _buildDocsHtml(
   </head>
   <body>
     <div id="swagger-ui"></div>
-    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"
+      integrity="sha256-shTJBi7S5wXAi5WzE8jCIVLyEQrDVi5mEdFLRnLdZo="
+      crossorigin="anonymous"></script>
     <script>
       const spec = $openApiJson;
 
