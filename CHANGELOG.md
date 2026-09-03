@@ -1,3 +1,41 @@
+## 2.5.0
+
+### Security & Hardening
+
+- **`Response.redirect()` validation** — Replaced `assert` with runtime `ArgumentError` validation so invalid status codes throw in release mode.
+- **`bodyParser()` error propagation** — Narrowed body parser try-catch to `on FormatException` so low-level socket and connection errors are not swallowed. Added `maxBodyBytes` guard to defend against body-size DoS (returns `413 Payload Too Large`).
+- **`cors()` preflight caching** — Added `maxAge` parameter (defaults to 86,400s) emitting `Access-Control-Max-Age` header on OPTIONS preflights to prevent repeated OPTIONS round-trips.
+- **`docs.dart` CDN asset integrity** — Added Subresource Integrity (SRI) hashes (`integrity` & `crossorigin`) to Swagger UI CDN scripts and stylesheets.
+- **Static files path traversal security** — Path resolution in `staticFiles()` now normalizes paths with URI semantics to prevent directory traversal escapes (`..`).
+- **`docsLocalOnly` option wiring** — Fixed constructor parameter passthrough in `QuadrantServer` so `docsLocalOnly: false` is honored when intentionally deployed behind a proxy.
+
+### Added
+
+- **`helmet()` middleware** — Injects 8 essential HTTP security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, etc.).
+- **`requestId()` middleware** — Generates and forwards `X-Request-ID` (UUID v4) for distributed request tracing, exposed in `req.context['requestId']`.
+- **`rateLimit()` middleware** — Token-bucket sliding-window rate limiting per client IP or custom key with `X-RateLimit-*` and `Retry-After` headers.
+- **`bearerAuth()` middleware** — Extracts bearer token, validates against async callback, and injects principal into `req.context['user']`.
+- **`ipFilter()` middleware** — Allow-list or deny-list client IP addresses supporting exact match and IPv4/IPv6 CIDR ranges.
+- **`cookieParser()` middleware & Response cookie helpers** — Parses `Cookie` header into `req.context['cookies']`; added `Response.withCookie()` and `Response.clearCookie()` with `Set-Cookie` generation.
+- **`formParser()` middleware** — Decodes `application/x-www-form-urlencoded` payloads into `req.body` with configurable byte limits.
+- **`multipartParser()` middleware** — Handles multipart file uploads and form fields, exposing typed `UploadedFile` instances in `req.context['files']`.
+- **`compress()` middleware** — Response gzip compression using `dart:io` `GZipCodec` with `Accept-Encoding` negotiation.
+- **`etag()` middleware** — Generates weak ETags and handles `If-None-Match` conditional requests returning `304 Not Modified`.
+- **`SseContext`** — Push-based Server-Sent Events (SSE) compatible with browser `EventSource` and automatic keep-alive comment pings.
+- **`StreamResponse`** — Response subclass for streaming raw bytes directly to client sockets without memory buffering.
+- **Request validation DSL** — `BodySchema` and `Field` (`string`, `int_`, `double_`, `bool_`, `list`) with `validate()` middleware returning `422 Unprocessable Entity`.
+- **`listenSecure()`** — First-class HTTPS/TLS binding with `certificateChain` and `privateKey` files.
+- **Health check endpoint** — Optional built-in `/health` reporting uptime, request counts, and RSS memory usage.
+- **WebSocket heartbeats** — Configurable `heartbeat` duration on `WebSocketRoute` for automatic ping/pong keepalive.
+- **Graceful in-flight request draining** — `app.close()` drains active requests before terminating.
+
+### Fixed
+
+- **WebSocket upgrade error handling** — Upgrades failing in `onError` now return an HTTP error response to the client rather than leaving the connection hanging.
+- **WebSocket middleware chain sentinel** — Replaced dummy 200 response with `Response(204)` sentinel.
+- **Connection close resilience** — Guarded `_writeResponse` against writing to already-closed HTTP sockets.
+- **Banner ASCII padding** — Handled high route counts safely with `max(0, ...)`.
+
 ## 2.0.0
 
 ### Added

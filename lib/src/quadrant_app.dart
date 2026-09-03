@@ -191,7 +191,7 @@ class QuadrantServer {
     // ignore: avoid_print
     print('┌─────────────────────────────────────────┐');
     // ignore: avoid_print
-    print('│         QuadrantServer v2.0.0            │');
+    print('│         QuadrantServer v2.5.0            │');
     // ignore: avoid_print
     print('├─────────────────────────────────────────┤');
     // ignore: avoid_print
