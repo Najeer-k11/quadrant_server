@@ -26,8 +26,7 @@ Middleware bodyParser({int maxBodyBytes = 1048576}) {
         await for (final chunk in req.raw) {
           bodyBytes.addAll(chunk);
           if (maxBodyBytes > 0 && bodyBytes.length > maxBodyBytes) {
-            // Drain the remaining data so the socket stays clean.
-            req.raw.drain<void>().ignore();
+
             return Response(
               statusCode: 413,
               headers: {'content-type': 'application/json'},

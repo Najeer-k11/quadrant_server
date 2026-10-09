@@ -2,8 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:quadrant_server/quadrant_server.dart';
-import 'package:quadrant_server/src/middlewares/compress.dart';
 import 'package:quadrant_server/src/middlewares/cookie_parser.dart';
+import 'package:quadrant_server/src/middlewares/static_files.dart'
+    show isPathWithinRoot;
 import 'package:quadrant_server/src/router.dart';
 import 'package:test/test.dart';
 
@@ -488,21 +489,35 @@ void main() {
   // ─── Static files path traversal protection ──────────────────
 
   group('Static files — path traversal protection', () {
-    test('detects paths that escape the root directory', () {
-      const rootPath = '/var/www/public';
-      const malicious = '../../etc/passwd';
-      final rootUri = Uri.directory(rootPath);
-      final resolvedPath =
-          rootUri.resolve(malicious).normalizePath().toFilePath();
-      expect(resolvedPath.startsWith(rootPath), false,
-          reason: 'Path traversal must be detectable');
+    const rootPath = '/var/www/public';
+
+    test('rejects a path outside the root', () {
+      expect(isPathWithinRoot(rootPath, '/etc/passwd'), false);
     });
 
-    test('allows paths within the root directory', () {
-      const rootPath = '/var/www/public';
-      const safe = 'images/logo.png';
-      final resolved = Directory('$rootPath/$safe').absolute.path;
-      expect(resolved.startsWith(rootPath), true);
+    test('rejects ../ that escapes the root', () {
+      final resolved = Uri.directory(rootPath)
+          .resolve('../../etc/passwd')
+          .normalizePath()
+          .toFilePath();
+      expect(isPathWithinRoot(rootPath, resolved), false);
+    });
+
+    test('rejects a sibling directory whose name starts with the root name', () {
+      final resolved = Uri.directory(rootPath)
+          .resolve('../public-secret/x.txt')
+          .normalizePath()
+          .toFilePath();
+      expect(isPathWithinRoot(rootPath, resolved), false);
+    });
+
+    test('allows a file inside the root', () {
+      expect(isPathWithinRoot(rootPath, '$rootPath/images/logo.png'), true);
+    });
+
+    test('allows the root itself, with or without a trailing slash', () {
+      expect(isPathWithinRoot(rootPath, rootPath), true);
+      expect(isPathWithinRoot(rootPath, '$rootPath/'), true);
     });
   });
 
@@ -740,7 +755,13 @@ void main() {
 
       expect(res.headers['content-encoding'], 'gzip');
       expect(res.headers['vary'], contains('Accept-Encoding'));
-      expect(consumeCompressedBody(res), isNotNull);
+      expect(res, isA<StreamResponse>());
+      final bytes = <int>[
+        for (final chunk in await (res as StreamResponse).stream.toList())
+          ...chunk,
+      ];
+      expect(utf8.decode(gzip.decode(bytes)), largeString);
+      expect(res.headers['content-length'], '${bytes.length}');
     });
 
     test('skips compression if client does not accept gzip', () async {
@@ -750,7 +771,22 @@ void main() {
       final res = await mw(req, () async => Response.text(largeString));
 
       expect(res.headers.containsKey('content-encoding'), isFalse);
-      expect(consumeCompressedBody(res), isNull);
+      expect(res, isNot(isA<StreamResponse>()));
+    });
+
+    test('compressed body survives an outer middleware (helmet before compress)',
+        () async {
+      final outer = helmet();
+      final inner = compress(minBytes: 20);
+      final req = _FakeRequest(headers: {'accept-encoding': 'gzip'});
+      final res = await outer(
+        req,
+        () => inner(req, () async => Response.text('a' * 100)),
+      );
+
+      expect(res.headers['content-encoding'], 'gzip');
+      expect(res.headers['x-content-type-options'], 'nosniff');
+      expect(res, isA<StreamResponse>());
     });
 
     test('skips compression if body is smaller than minBytes', () async {
@@ -862,6 +898,42 @@ void main() {
         await app.close();
       }
     });
+  });
+
+  // Middlewares must keep cookies and StreamResponse.
+
+  group('Middleware keeps cookies and StreamResponse', () {
+    final middlewares = <String, Middleware>{
+      'cors': cors(),
+      'helmet': helmet(),
+      'requestId': requestId(),
+      'rateLimit': rateLimit(
+        maxRequests: 100,
+        window: const Duration(minutes: 1),
+        keyExtractor: (_) => 'test-key',
+      ),
+    };
+
+    for (final entry in middlewares.entries) {
+      test('${entry.key} keeps Set-Cookie values', () async {
+        final res = await entry.value(
+          _FakeRequest(),
+          () async => Response.ok({'ok': true}).withCookie('session', 'abc'),
+        );
+        expect(res.cookies, hasLength(1));
+      });
+
+      test('${entry.key} keeps a StreamResponse intact', () async {
+        final res = await entry.value(
+          _FakeRequest(),
+          () async => StreamResponse(stream: Stream.value([1, 2, 3])),
+        );
+        expect(res, isA<StreamResponse>());
+        expect(await (res as StreamResponse).stream.toList(), [
+          [1, 2, 3]
+        ]);
+      });
+    }
   });
 }
 

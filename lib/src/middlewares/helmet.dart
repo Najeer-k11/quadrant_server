@@ -1,6 +1,5 @@
 import '../middleware.dart';
 import '../request.dart';
-import '../response.dart';
 
 /// Security headers middleware ("helmet").
 ///
@@ -71,11 +70,6 @@ Middleware helmet({
     // so handlers can override a specific header if truly needed.
     final merged = <String, String>{...securityHeaders, ...response.headers};
 
-    return Response(
-      statusCode: response.statusCode,
-      headers: merged,
-      body: response.body,
-      cookies: response.cookies,
-    );
+    return response.copyWith(headers: merged);
   };
 }

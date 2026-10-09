@@ -13,7 +13,6 @@ import 'websocket_context.dart';
 import 'websocket_route.dart';
 import 'middlewares/bearer_auth.dart';
 import 'middlewares/body_parser.dart';
-import 'middlewares/compress.dart';
 import 'middlewares/cookie_parser.dart';
 import 'middlewares/multipart_parser.dart';
 import 'middlewares/request_id.dart';
@@ -191,7 +190,7 @@ class QuadrantServer {
     // ignore: avoid_print
     print('┌─────────────────────────────────────────┐');
     // ignore: avoid_print
-    print('│         QuadrantServer v2.5.0            │');
+    print('│         QuadrantServer v2.5.1            │');
     // ignore: avoid_print
     print('├─────────────────────────────────────────┤');
     // ignore: avoid_print
@@ -456,14 +455,6 @@ class QuadrantServer {
             .pipe(httpResponse)
             .catchError((_) {})
             .then((_) => httpResponse.close().catchError((_) {})));
-        return;
-      }
-
-      // Check if compress() stored compressed bytes for this response.
-      final compressedBytes = consumeCompressedBody(response);
-      if (compressedBytes != null) {
-        httpResponse.add(compressedBytes);
-        httpResponse.close();
         return;
       }
 

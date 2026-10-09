@@ -37,7 +37,7 @@ Handler staticFiles(String rootDir, {bool indexFallback = true}) {
     final resolvedPath = resolvedUri.toFilePath();
 
     // Reject if the resolved path escapes the root directory.
-    if (!resolvedPath.startsWith(root.path)) {
+    if (!isPathWithinRoot(root.path, resolvedPath)) {
       return Response.forbidden('Access denied');
     }
 
@@ -103,6 +103,17 @@ Handler staticFiles(String rootDir, {bool indexFallback = true}) {
     // Return a sentinel — body already written above.
     return const Response(statusCode: 200);
   };
+}
+
+/// Returns true if [resolvedPath] is [rootPath] itself or is inside it.
+///
+/// A path separator is required after [rootPath], so `/srv/public-private`
+/// is NOT inside `/srv/public`. Public only so tests can call it; it is not
+/// exported from `package:quadrant_server/quadrant_server.dart`.
+bool isPathWithinRoot(String rootPath, String resolvedPath) {
+  final sep = Platform.pathSeparator;
+  final rootWithSep = rootPath.endsWith(sep) ? rootPath : '$rootPath$sep';
+  return resolvedPath == rootPath || resolvedPath.startsWith(rootWithSep);
 }
 
 /// Maps common file extensions to MIME types.

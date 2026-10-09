@@ -22,7 +22,7 @@ export 'src/websocket_route.dart';
 // ─── Middlewares ──────────────────────────────────────────────
 export 'src/middlewares/bearer_auth.dart' hide consumeContextOverride;
 export 'src/middlewares/body_parser.dart';
-export 'src/middlewares/compress.dart' hide consumeCompressedBody;
+export 'src/middlewares/compress.dart';
 export 'src/middlewares/cookie_parser.dart' hide consumeCookieContext;
 export 'src/middlewares/cors.dart';
 export 'src/middlewares/etag.dart';
@@ -33,5 +33,5 @@ export 'src/middlewares/logger.dart';
 export 'src/middlewares/multipart_parser.dart' hide consumeMultipartContext;
 export 'src/middlewares/rate_limit.dart';
 export 'src/middlewares/request_id.dart' hide consumeRequestIdContext;
-export 'src/middlewares/static_files.dart';
+export 'src/middlewares/static_files.dart' show staticFiles;
 export 'src/middlewares/timeout.dart';

@@ -46,7 +46,7 @@ Middleware formParser({int maxBodyBytes = 65536}) {
       await for (final chunk in req.raw) {
         bodyBytes.addAll(chunk);
         if (maxBodyBytes > 0 && bodyBytes.length > maxBodyBytes) {
-          req.raw.drain<void>().ignore();
+
           return Response(
             statusCode: 413,
             headers: {'content-type': 'application/json'},

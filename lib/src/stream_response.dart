@@ -63,7 +63,24 @@ class StreamResponse extends Response {
     required this.stream,
     super.statusCode = 200,
     super.headers = const {},
+    super.cookies = const [],
   }) : super(
           body: '', // body field unused — framework pipes [stream] directly
         );
+
+  /// Keeps the same [stream]; [body] is ignored because it is always empty.
+  @override
+  Response copyWith({
+    int? statusCode,
+    Map<String, String>? headers,
+    String? body,
+    List<String>? cookies,
+  }) {
+    return StreamResponse(
+      stream: stream,
+      statusCode: statusCode ?? this.statusCode,
+      headers: headers ?? this.headers,
+      cookies: cookies ?? this.cookies,
+    );
+  }
 }

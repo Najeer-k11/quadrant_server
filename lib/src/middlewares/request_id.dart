@@ -2,7 +2,6 @@ import 'dart:math';
 
 import '../middleware.dart';
 import '../request.dart';
-import '../response.dart';
 
 /// Request ID middleware.
 ///
@@ -40,12 +39,7 @@ Middleware requestId({
     _requestIdOverrides[req.raw] = null;
 
     // Append the ID to the response headers.
-    return Response(
-      statusCode: response.statusCode,
-      headers: {...response.headers, headerName: id},
-      body: response.body,
-      cookies: response.cookies,
-    );
+    return response.copyWith(headers: {...response.headers, headerName: id});
   };
 }
 

@@ -62,15 +62,21 @@ class UploadedFile {
 /// final fields = req.context['fields'] as Map<String, String>;
 ///
 /// final avatar = files.firstWhere((f) => f.fieldName == 'avatar');
-/// await File('uploads/${avatar.filename}').writeAsBytes(avatar.bytes);
+/// // Never use the client-supplied filename as a path. Generate your own:
+/// final savedName = '${DateTime.now().microsecondsSinceEpoch}.bin';
+/// await File('uploads/$savedName').writeAsBytes(avatar.bytes);
 /// ```
 ///
 /// [maxFileSize] — maximum bytes per individual file. Defaults to 10 MB.
 ///   Returns `413` if any file exceeds this limit.
+/// [maxTotalBytes] — maximum size of the whole request body (all files and
+///   fields together). Defaults to 50 MB. Returns `413` if exceeded. Set to
+///   `0` to disable. Keep it at least as large as [maxFileSize].
 /// [filesContextKey] — key for files in context. Defaults to `'files'`.
 /// [fieldsContextKey] — key for fields in context. Defaults to `'fields'`.
 Middleware multipartParser({
   int maxFileSize = 10 * 1024 * 1024,
+  int maxTotalBytes = 50 * 1024 * 1024,
   String filesContextKey = 'files',
   String fieldsContextKey = 'fields',
 }) {
@@ -87,10 +93,18 @@ Middleware multipartParser({
     }
 
     try {
-      // Read the entire body.
+      // Reject early when the client already declares a body that is too big.
+      if (maxTotalBytes > 0 && req.raw.contentLength > maxTotalBytes) {
+        return _tooLarge(maxTotalBytes);
+      }
+
+      // Read the body, enforcing the total size limit while streaming.
       final bodyBytes = <int>[];
       await for (final chunk in req.raw) {
         bodyBytes.addAll(chunk);
+        if (maxTotalBytes > 0 && bodyBytes.length > maxTotalBytes) {
+          return _tooLarge(maxTotalBytes);
+        }
       }
 
       final result = _parseMultipart(
@@ -137,6 +151,12 @@ class _MultipartResult {
 
   _MultipartResult(this.files, this.fields, {this.oversized = false});
 }
+
+Response _tooLarge(int maxTotalBytes) => Response(
+      statusCode: 413,
+      headers: {'content-type': 'application/json'},
+      body: '{"error":"Payload Too Large","maxBytes":$maxTotalBytes}',
+    );
 
 String? _extractBoundary(String contentType) {
   for (final part in contentType.split(';')) {

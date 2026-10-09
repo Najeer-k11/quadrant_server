@@ -18,7 +18,7 @@ A Dart-first, batteries-included HTTP server framework built directly on `dart:i
   - `cors()` — Cross-Origin Resource Sharing with preflight caching & `maxAge`
   - `logger()` — Structured request logging with custom sinks
   - `bodyParser()` — JSON parser with payload size limits (`413`)
-  - `rateLimit()` — Token-bucket sliding window rate limiting
+  - `rateLimit()` — Sliding-window rate limiting
   - `bearerAuth()` — Bearer token authentication & principal injection
   - `staticFiles()` — Path-traversal-safe file server with ETag & 304 caching
   - `requestId()` — Automatic UUID v4 tracing & header propagation
@@ -97,7 +97,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  quadrant_server: ^2.5.0
+  quadrant_server: ^2.5.1
 ```
 
 Then run:
@@ -237,7 +237,7 @@ return Response.ok({}).clearCookie('session_id');
 | `bearerAuth()` | Bearer token auth; injects user into `req.context['user']` | `validate: (token) async => User?` |
 | `bodyParser()` | JSON body parser with size guard | `maxBodyBytes` (default: 1 MB) |
 | `formParser()` | Parses URL-encoded form submissions | `maxBodyBytes` (default: 64 KB) |
-| `multipartParser()` | Decodes file uploads & multipart fields into context | `maxFileSize` (default: 10 MB) |
+| `multipartParser()` | Decodes file uploads & multipart fields into context | `maxFileSize` (default: 10 MB), `maxTotalBytes` (default: 50 MB) |
 | `cookieParser()` | Parses `Cookie` header into `req.context['cookies']` | `contextKey` |
 | `ipFilter()` | Restricts access by exact IP or CIDR block | `allow: [...]` or `deny: [...]` |
 | `compress()` | Gzip response compression with Accept-Encoding check | `minBytes` (default: 512 B) |
@@ -307,7 +307,9 @@ Route.post(
 
     for (final file in files) {
       print('Received: ${file.filename} (${file.size} bytes)');
-      await File('uploads/${file.filename}').writeAsBytes(file.bytes);
+      // Never use file.filename as a path - it is controlled by the client.
+      final savedName = '${DateTime.now().microsecondsSinceEpoch}.bin';
+      await File('uploads/$savedName').writeAsBytes(file.bytes);
     }
 
     return Response.ok({'uploaded': files.length});

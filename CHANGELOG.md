@@ -1,3 +1,28 @@
+## 2.5.1
+
+### Security
+
+- **Swagger UI SRI** — The `integrity` values shipped in 2.5.0 for `/quadrant_docs` were malformed and the CDN URL used a floating `@5` tag. The page now pins `swagger-ui-dist@5.33.1` with valid SHA-384 hashes.
+- **`staticFiles()`** — The root-boundary check now requires a path separator, so a sibling directory whose name starts with the root's name (for example `/srv/public-private` for root `/srv/public`) is no longer reachable.
+- **`multipartParser()`** — New `maxTotalBytes` option (default 50 MB) caps the whole request body, checked against `Content-Length` and again while streaming. Previously only per-file size was checked, after the full body had been buffered.
+
+### Fixed
+
+- **Dropped cookies** — `cors()` and `rateLimit()` no longer discard `Set-Cookie` values set with `Response.withCookie()`.
+- **`StreamResponse` through middleware** — `helmet()`, `cors()`, `requestId()` and `rateLimit()` no longer replace a `StreamResponse` with an empty body.
+- **`compress()` middleware order** — Compressed bodies now survive outer middlewares. Previously `compress()` only worked when it was the first middleware; otherwise clients received a gzip header with an empty body.
+- **`bodyParser()` / `formParser()` 413 path** — Removed `req.raw.drain()` calls that ran after the request stream was already cancelled.
+- **`rateLimit()`** — Idle clients are now evicted from memory. The docs now call it a sliding-window limiter (it never used a token bucket).
+
+### Added
+
+- `Response.copyWith()`, overridden by `StreamResponse`; `StreamResponse` now accepts `cookies`.
+- `multipartParser(maxTotalBytes: ...)`.
+
+### Changed
+
+- `compress()` now returns a `StreamResponse`. The internal `consumeCompressedBody` helper was removed.
+
 ## 2.5.0
 
 ### Security & Hardening
@@ -13,7 +38,7 @@
 
 - **`helmet()` middleware** — Injects 8 essential HTTP security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, etc.).
 - **`requestId()` middleware** — Generates and forwards `X-Request-ID` (UUID v4) for distributed request tracing, exposed in `req.context['requestId']`.
-- **`rateLimit()` middleware** — Token-bucket sliding-window rate limiting per client IP or custom key with `X-RateLimit-*` and `Retry-After` headers.
+- **`rateLimit()` middleware** — Sliding-window rate limiting per client IP or custom key with `X-RateLimit-*` and `Retry-After` headers.
 - **`bearerAuth()` middleware** — Extracts bearer token, validates against async callback, and injects principal into `req.context['user']`.
 - **`ipFilter()` middleware** — Allow-list or deny-list client IP addresses supporting exact match and IPv4/IPv6 CIDR ranges.
 - **`cookieParser()` middleware & Response cookie helpers** — Parses `Cookie` header into `req.context['cookies']`; added `Response.withCookie()` and `Response.clearCookie()` with `Set-Cookie` generation.
@@ -28,6 +53,15 @@
 - **Health check endpoint** — Optional built-in `/health` reporting uptime, request counts, and RSS memory usage.
 - **WebSocket heartbeats** — Configurable `heartbeat` duration on `WebSocketRoute` for automatic ping/pong keepalive.
 - **Graceful in-flight request draining** — `app.close()` drains active requests before terminating.
+- **`timeout(Duration, {onTimeout})` middleware** — Races the handler chain against a deadline; returns `408` with `{"error":"Request Timeout","timeoutMs":…}` or your `onTimeout` response.
+- **`staticFiles(rootDir, {indexFallback})` route handler** — MIME detection, `ETag`/`Last-Modified` with `304` for `If-None-Match`/`If-Modified-Since`, `Cache-Control: public, max-age=3600`, `index.html` fallback.
+- **`healthCheckPath` option** — Default `/health`. The endpoint is answered before middleware runs, so it skips auth, rate limiting and logging.
+- **`app.close({force})`** — `force: true` skips draining in-flight requests.
+- **TLS/binding options** — `listenSecure(password:)` for encrypted keys; `listen`/`listenSecure` accept `address`.
+- **Validation rules** — `required`, `minLength`, `maxLength`, `matches(RegExp)`, `email`, `oneOf`, `min`, `max`, `minItems`, `maxItems`. String inputs are coerced for int/double/bool fields. Failures return `422 {"errors": {field: message}}`.
+- **`SseContext` API** — `send(id:, retry:)`, `sendComment()`, `close()`, `isOpen`, `keepAliveInterval` (default 15 s, `Duration.zero` disables), `X-Accel-Buffering: no`.
+- **`WebSocketGroup`** — `exclude:` on `broadcast`/`broadcastJson`, plus `isEmpty`, `isNotEmpty`, `length`, `members`.
+- **Middleware options** — `bearerAuth(contextKey, realm)` with `WWW-Authenticate` on 401; `ipFilter(onDeny)`; `multipartParser(maxFileSize, filesContextKey, fieldsContextKey)` returning `413` for oversized files; `bodyParser`/`formParser` accept `maxBodyBytes: 0` to disable the limit; all 8 `helmet()` headers are overridable and `null` removes one.
 
 ### Fixed
 

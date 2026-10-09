@@ -3,7 +3,7 @@ import 'dart:io';
 
 import '../middleware.dart';
 import '../request.dart';
-import '../response.dart';
+import '../stream_response.dart';
 
 /// Gzip response compression middleware.
 ///
@@ -15,6 +15,10 @@ import '../response.dart';
 ///
 /// Sets `Content-Encoding: gzip` and `Vary: Accept-Encoding` on compressed
 /// responses.
+///
+/// The compressed bytes travel inside a [StreamResponse], so other
+/// middlewares (helmet, cors, ...) can still add headers to the response
+/// without losing the body, whatever the middleware order is.
 ///
 /// ```dart
 /// middlewares: [compress()]
@@ -45,23 +49,17 @@ Middleware compress({int minBytes = 512}) {
     // Compress.
     final compressed = GZipCodec().encode(bodyBytes);
 
-    final newHeaders = <String, String>{
-      ...response.headers,
-      'content-encoding': 'gzip',
-      'content-length': '${compressed.length}',
-      'vary': _mergeVary(response.headers['vary'], 'Accept-Encoding'),
-    };
-
-    final compressedResponse = Response(
+    return StreamResponse(
+      stream: Stream<List<int>>.value(compressed),
       statusCode: response.statusCode,
-      headers: newHeaders,
-      body: '', // body will be written as raw bytes by _writeResponse
+      headers: <String, String>{
+        ...response.headers,
+        'content-encoding': 'gzip',
+        'content-length': '${compressed.length}',
+        'vary': _mergeVary(response.headers['vary'], 'Accept-Encoding'),
+      },
       cookies: response.cookies,
     );
-
-    _compressedBodies[_CompressKey(compressedResponse)] = compressed;
-
-    return compressedResponse;
   };
 }
 
@@ -70,25 +68,4 @@ String _mergeVary(String? existing, String directive) {
   if (existing == null || existing.isEmpty) return directive;
   if (existing.contains(directive)) return existing;
   return '$existing, $directive';
-}
-
-// ─── Compressed body store ────────────────────────────────────
-
-/// Key used to store compressed bytes keyed by Response identity.
-class _CompressKey {
-  final Response response;
-  _CompressKey(this.response);
-  @override
-  bool operator ==(Object other) =>
-      other is _CompressKey && identical(response, other.response);
-  @override
-  int get hashCode => identityHashCode(response);
-}
-
-final _compressedBodies = <_CompressKey, List<int>>{};
-
-/// Internal — retrieves and removes compressed bytes for a response.
-/// Called by [QuadrantServer._writeResponse].
-List<int>? consumeCompressedBody(Response response) {
-  return _compressedBodies.remove(_CompressKey(response));
 }

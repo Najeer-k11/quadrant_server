@@ -4,7 +4,7 @@ import '../middleware.dart';
 import '../request.dart';
 import '../response.dart';
 
-/// Rate-limiting middleware using a sliding-window token-bucket algorithm.
+/// Rate-limiting middleware using a sliding-window (request log) algorithm.
 ///
 /// Limits the number of requests a single client IP can make within a given
 /// [window]. Clients that exceed [maxRequests] receive a `429 Too Many
@@ -35,6 +35,7 @@ Middleware rateLimit({
 }) {
   final buckets = <String, _Bucket>{};
   final windowMs = window.inMilliseconds;
+  var lastSweepMs = DateTime.now().millisecondsSinceEpoch;
 
   String defaultKey(Request req) {
     return req.raw.connectionInfo?.remoteAddress.address ?? 'unknown';
@@ -45,6 +46,15 @@ Middleware rateLimit({
   return (Request req, Next next) async {
     final key = getKey(req);
     final now = DateTime.now().millisecondsSinceEpoch;
+
+    // Once per window, drop clients that have been idle for a full window so
+    // the map does not grow forever with every distinct client.
+    if (now - lastSweepMs > windowMs) {
+      lastSweepMs = now;
+      buckets.removeWhere(
+        (_, b) => b.timestamps.isEmpty || now - b.timestamps.last > windowMs,
+      );
+    }
 
     // Lazy-create / fetch the bucket for this key.
     final bucket = buckets.putIfAbsent(key, () => _Bucket(maxRequests));
@@ -83,15 +93,13 @@ Middleware rateLimit({
         ? bucket.timestamps.first + windowMs
         : now + windowMs;
 
-    return Response(
-      statusCode: response.statusCode,
+    return response.copyWith(
       headers: {
         ...response.headers,
         'x-ratelimit-limit': '$maxRequests',
         'x-ratelimit-remaining': '${maxRequests - bucket.timestamps.length}',
         'x-ratelimit-reset': '${(resetAt / 1000).ceil()}',
       },
-      body: response.body,
     );
   };
 }

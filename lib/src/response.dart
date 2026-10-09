@@ -144,17 +144,30 @@ class Response {
     if (secure) buf.write('; Secure');
     buf.write('; SameSite=$sameSite');
 
-    return Response(
-      statusCode: statusCode,
-      headers: headers,
-      body: body,
-      cookies: [...cookies, buf.toString()],
-    );
+    return copyWith(cookies: [...cookies, buf.toString()]);
   }
 
   /// Returns a new [Response] that clears a cookie by setting `Max-Age=0`.
   Response clearCookie(String name, {String path = '/'}) {
     return withCookie(name, '', maxAge: Duration.zero, path: path);
+  }
+
+  /// Returns a copy of this response with the given fields replaced.
+  ///
+  /// Middlewares should use this instead of `Response(...)` so that nothing
+  /// is lost (cookies) and subclasses such as [StreamResponse] survive.
+  Response copyWith({
+    int? statusCode,
+    Map<String, String>? headers,
+    String? body,
+    List<String>? cookies,
+  }) {
+    return Response(
+      statusCode: statusCode ?? this.statusCode,
+      headers: headers ?? this.headers,
+      body: body ?? this.body,
+      cookies: cookies ?? this.cookies,
+    );
   }
 
   // ─── Internal ────────────────────────────────────────────────

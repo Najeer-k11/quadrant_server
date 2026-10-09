@@ -47,10 +47,6 @@ Middleware cors({
     final mergedHeaders = Map<String, String>.from(response.headers)
       ..addAll(corsHeaders);
 
-    return Response(
-      statusCode: response.statusCode,
-      headers: mergedHeaders,
-      body: response.body,
-    );
+    return response.copyWith(headers: mergedHeaders);
   };
 }
