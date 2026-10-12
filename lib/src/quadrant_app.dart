@@ -190,7 +190,7 @@ class QuadrantServer {
     // ignore: avoid_print
     print('┌─────────────────────────────────────────┐');
     // ignore: avoid_print
-    print('│         QuadrantServer v2.5.1            │');
+    print('│         QuadrantServer v2.5.2            │');
     // ignore: avoid_print
     print('├─────────────────────────────────────────┤');
     // ignore: avoid_print
@@ -288,17 +288,13 @@ class QuadrantServer {
             final ctx = await WebSocketContext.fromUpgrade(wsRequest);
             await _handleWebSocket(ctx, route);
           } catch (error) {
-            final response = onError != null
-                ? onError!(error, wsRequest)
-                : Response.internalServerError('WebSocket upgrade failed');
-            _writeResponse(httpRequest.response, response);
+            _writeResponse(httpRequest.response,
+                _errorResponse(error, wsRequest, 'WebSocket upgrade failed'));
           }
       }
     } catch (error) {
-      final response = onError != null
-          ? onError!(error, request)
-          : Response.internalServerError('Internal server error');
-      _writeResponse(httpRequest.response, response);
+      _writeResponse(httpRequest.response,
+          _errorResponse(error, request, 'Internal server error'));
     } finally {
       RequestHolder.instance.consumeParsedBody(httpRequest);
       _inFlightCount--;
@@ -307,6 +303,17 @@ class QuadrantServer {
         _activeCompleter = null;
       }
     }
+  }
+
+  /// Asks [onError] for a response; falls back to a 500 if it throws too.
+  Response _errorResponse(Object error, Request request, String fallback) {
+    try {
+      if (onError != null) return onError!(error, request);
+    } catch (handlerError) {
+      // ignore: avoid_print
+      print('[QuadrantServer] onError threw: $handlerError');
+    }
+    return Response.internalServerError(fallback);
   }
 
   // ─── Middleware chain ─────────────────────────────────────────
@@ -384,7 +391,16 @@ class QuadrantServer {
 
   Future<void> _handleWebSocket(
       WebSocketContext ctx, WebSocketRoute route) async {
-    if (route.onStart != null) await route.onStart!(ctx);
+    if (route.onStart != null) {
+      try {
+        await route.onStart!(ctx);
+      } catch (_) {
+        unawaited(ctx.socket
+            .close(WebSocketStatus.internalServerError)
+            .catchError((_) {}));
+        rethrow;
+      }
+    }
 
     // Wire heartbeat if configured.
     Timer? heartbeatTimer;
@@ -394,21 +410,39 @@ class QuadrantServer {
 
     final completer = Completer<void>();
 
-    ctx.socket.listen(
-      (data) async => route.onMessage(ctx, data),
-      onError: (Object error) async {
-        if (route.onError != null) {
-          await route.onError!(ctx, error);
-        } else {
-          // ignore: avoid_print
-          print('[QuadrantServer] WS error on ${ctx.request.path}: $error');
+    Future<void> report(Object error) async {
+      if (route.onError != null) {
+        try {
+          return await route.onError!(ctx, error);
+        } catch (handlerError) {
+          error = handlerError;
         }
-      },
+      }
+      // ignore: avoid_print
+      print('[QuadrantServer] WS error on ${ctx.request.path}: $error');
+    }
+
+    // Callbacks run inside the socket listener, where an uncaught error
+    // would kill the whole process.
+    Future<void> guard(Future<void> Function() callback) async {
+      try {
+        await callback();
+      } catch (error) {
+        await report(error);
+      }
+    }
+
+    ctx.socket.listen(
+      (data) => guard(() => route.onMessage(ctx, data)),
+      onError: report,
       onDone: () async {
         heartbeatTimer?.cancel();
+        // Close our side too: `socket.done` only completes after that, and
+        // WebSocketGroup waits on it to drop the connection.
+        unawaited(ctx.socket.close().catchError((_) {}));
         if (route.onClose != null) {
-          await route.onClose!(
-              ctx, ctx.socket.closeCode, ctx.socket.closeReason);
+          await guard(() => route.onClose!(
+              ctx, ctx.socket.closeCode, ctx.socket.closeReason));
         }
         completer.complete();
       },

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'websocket_context.dart';
 
 /// A managed group of WebSocket connections that can broadcast messages
@@ -36,8 +38,14 @@ class WebSocketGroup {
 
   // ─── Membership ───────────────────────────────────────────────
 
-  /// Adds [ctx] to the group.
-  void add(WebSocketContext ctx) => _members.add(ctx);
+  /// Adds [ctx] to the group. It leaves the group by itself once its
+  /// connection closes, so a closed connection is never kept in memory.
+  void add(WebSocketContext ctx) {
+    _members.add(ctx);
+    unawaited(ctx.socket.done
+        .whenComplete(() => _members.remove(ctx))
+        .catchError((_) {}));
+  }
 
   /// Removes [ctx] from the group.
   void remove(WebSocketContext ctx) => _members.remove(ctx);

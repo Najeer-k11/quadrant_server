@@ -1,3 +1,17 @@
+## 2.5.2
+
+### Fixed
+
+- **Memory spikes on request bodies** — `bodyParser()`, `formParser()` and `multipartParser()` collected the body in a `List<int>`, which takes 8 bytes per byte plus room to grow. They now use `BytesBuilder`, and `multipartParser()` no longer copies each file twice. A 45 MB multipart upload (rejected with `413` by the default 10 MB file limit) used to raise process memory to about 640 MB; it now stays around 140 MB.
+- **`staticFiles()` loaded whole files into memory** — Files are now streamed from disk. Serving a 200 MB file used to take the process to 256 MB of memory; it now stays at 12 MB.
+- **`WebSocketGroup` kept closed connections** — A closed connection stayed in its group until the next `broadcast()`, unless `onClose` called `remove()`. Members now leave the group by themselves when the connection closes. To make this work, the server now closes its side of a WebSocket when the client leaves, so `socket.done` completes. Calling `remove()` still works.
+- **Errors in user callbacks crashed the server** — An exception thrown in a WebSocket `onMessage` or `onClose` callback, or in the server's own `onError`, ended the whole process. WebSocket callback errors now go to the route's `onError` (or are printed). A throwing `onError` now produces a plain `500`. A throwing `onClose` no longer makes `close()` hang. If `onStart` throws, the socket is now closed with code `1011`; before, it stayed open with nobody listening.
+- **Malformed query strings crashed the server** — A request such as `/?a=%FF` (invalid UTF-8) threw before any handler ran, so any client could stop the process. Such bytes are now decoded as `U+FFFD`.
+
+### Documentation
+
+- **`SseContext.from(keepAliveInterval:)`** — Disabling the keep-alive pings means a client that went away is only noticed on the next `send()`, so the handler stays in memory until then. This is now documented.
+
 ## 2.5.1
 
 ### Security

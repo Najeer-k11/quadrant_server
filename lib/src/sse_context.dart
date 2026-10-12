@@ -52,7 +52,10 @@ class SseContext {
   ///
   /// [keepAliveInterval] — interval between empty comment pings sent to keep
   ///   proxies and load balancers from closing the idle connection.
-  ///   Defaults to 15 seconds. Set to `Duration.zero` to disable.
+  ///   Defaults to 15 seconds. Set to `Duration.zero` to disable. The pings
+  ///   are also how a client that went away gets noticed: without them, it
+  ///   is only noticed on your next [send], so until then [done] does not
+  ///   complete and your handler stays in memory.
   static Future<SseContext> from(
     Request req, {
     Duration keepAliveInterval = const Duration(seconds: 15),

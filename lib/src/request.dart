@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 /// Immutable wrapper around [HttpRequest] from dart:io.
@@ -64,7 +65,9 @@ class Request {
       method: httpRequest.method.toUpperCase(),
       path: uri.path,
       params: {},
-      query: uri.queryParameters,
+      // Bad UTF-8 becomes U+FFFD instead of throwing before any handler runs.
+      query: Uri.splitQueryString(uri.query,
+          encoding: const Utf8Codec(allowMalformed: true)),
       headers: headers,
       body: null,
       context: const {},

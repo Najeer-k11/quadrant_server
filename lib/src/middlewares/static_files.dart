@@ -80,24 +80,23 @@ Handler staticFiles(String rootDir, {bool indexFallback = true}) {
       }
     }
 
-    final bytes = await target.readAsBytes();
     final mime = _mimeType(target.path);
 
     // Build headers.
     final headers = <String, String>{
       'content-type': mime,
-      'content-length': '${bytes.length}',
+      'content-length': '${stat.size}',
       'etag': etag,
       'last-modified': HttpDate.format(lastModified),
       'cache-control': 'public, max-age=3600',
     };
 
-    // Write raw bytes directly via the dart:io response.
-    // We bypass Response.body (String) to avoid UTF-8 corruption of
-    // binary assets (images, fonts, etc.).
+    // Stream raw bytes from disk directly via the dart:io response, so the
+    // file is never held in memory. We bypass Response.body (String) to
+    // avoid UTF-8 corruption of binary assets (images, fonts, etc.).
     req.raw.response.statusCode = 200;
     headers.forEach(req.raw.response.headers.set);
-    req.raw.response.add(bytes);
+    await req.raw.response.addStream(target.openRead());
     await req.raw.response.close();
 
     // Return a sentinel — body already written above.

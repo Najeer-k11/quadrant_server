@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:quadrant_server/quadrant_server.dart';
 import 'package:quadrant_server/src/middlewares/cookie_parser.dart';
@@ -265,6 +266,32 @@ void main() {
       final g = WebSocketGroup();
       expect(g.isNotEmpty, false);
       expect(g.isEmpty, true);
+    });
+
+    test('drops a member once its client disconnects', () async {
+      final group = WebSocketGroup();
+      final closeCodes = <int?>[];
+      final app = QuadrantServer(routes: const [], webSocketRoutes: [
+        WebSocketRoute(
+          path: '/ws',
+          onStart: (ctx) async => group.add(ctx),
+          onMessage: (ctx, data) async {},
+          onClose: (ctx, code, reason) async => closeCodes.add(code),
+        ),
+      ]);
+      final server = await app.listen(port: 0);
+
+      try {
+        final ws = await WebSocket.connect('ws://localhost:${server.port}/ws');
+        await _waitUntil(() => group.isNotEmpty);
+        await ws.close(4000);
+        await _waitUntil(() => group.isEmpty); // no broadcast needed
+
+        expect(group.isEmpty, true);
+        expect(closeCodes, [4000]);
+      } finally {
+        await app.close(force: true);
+      }
     });
   });
 
@@ -935,6 +962,217 @@ void main() {
       });
     }
   });
+
+  // ─── Errors in user code ─────────────────────────────────────
+
+  group('A throwing callback does not kill the server', () {
+    late QuadrantServer app;
+    late HttpServer server;
+    final client = HttpClient();
+    final wsErrors = <Object>[];
+    var mode = '';
+
+    Never boom() => throw StateError('boom');
+
+    Future<int> get(String path) async {
+      final res = await (await client.getUrl(
+              Uri.parse('http://localhost:${server.port}$path')))
+          .close();
+      await res.drain<void>();
+      return res.statusCode;
+    }
+
+    setUp(() async {
+      wsErrors.clear();
+      mode = '';
+      app = QuadrantServer(
+        routes: [
+          Route.get(path: '/ok', handler: _ok),
+          Route.get(path: '/throw', handler: (req) async => boom()),
+        ],
+        onError: (error, req) => mode == 'onError' ? boom() : Response.ok(''),
+        webSocketRoutes: [
+          WebSocketRoute(
+            path: '/ws',
+            onStart: (ctx) async {
+              if (mode == 'onStart') boom();
+            },
+            onMessage: (ctx, data) async => boom(),
+            onClose: (ctx, code, reason) async {
+              if (mode == 'onClose') boom();
+            },
+            onError: (ctx, error) async => wsErrors.add(error),
+          ),
+        ],
+      );
+      server = await app.listen(port: 0);
+    });
+
+    tearDown(() => app.close(force: true));
+    tearDownAll(() => client.close(force: true));
+
+    test('onMessage error goes to the route onError', () async {
+      final ws = await WebSocket.connect('ws://localhost:${server.port}/ws');
+      ws.add('hi');
+      await _waitUntil(() => wsErrors.isNotEmpty);
+      expect(wsErrors.single, isA<StateError>());
+      expect(await get('/ok'), 200);
+      await ws.close();
+    });
+
+    test('onClose error still lets close() finish', () async {
+      mode = 'onClose';
+      final ws = await WebSocket.connect('ws://localhost:${server.port}/ws');
+      await ws.close();
+      await _waitUntil(() => wsErrors.isNotEmpty);
+      expect(await get('/ok'), 200);
+      await app.close().timeout(const Duration(seconds: 5));
+    });
+
+    test('onStart error closes the socket with 1011', () async {
+      mode = 'onStart';
+      final ws = await WebSocket.connect('ws://localhost:${server.port}/ws');
+      await ws.drain<void>().timeout(const Duration(seconds: 5));
+      expect(ws.closeCode, WebSocketStatus.internalServerError);
+      await ws.close();
+    });
+
+    test('a throwing global onError answers 500', () async {
+      mode = 'onError';
+      expect(await get('/throw'), 500);
+      expect(await get('/ok'), 200);
+    });
+
+    test('a query string with bad UTF-8 is still served', () async {
+      expect(await get('/ok?a=%FF'), 200);
+    });
+  });
+
+  // ─── Body size limits ────────────────────────────────────────
+
+  group('Body parsers enforce their byte limit', () {
+    final cases = [
+      ('bodyParser', 'application/json', bodyParser(maxBodyBytes: 10)),
+      (
+        'formParser',
+        'application/x-www-form-urlencoded',
+        formParser(maxBodyBytes: 10)
+      ),
+      (
+        'multipartParser',
+        'multipart/form-data; boundary=b',
+        multipartParser(maxTotalBytes: 10)
+      ),
+    ];
+
+    for (final (name, contentType, parser) in cases) {
+      test('$name returns 413 once the body passes the limit', () async {
+        final app = QuadrantServer(routes: [
+          Route.post(path: '/', handler: _ok, middlewares: [parser]),
+        ]);
+        final server = await app.listen(port: 0);
+        final client = HttpClient();
+
+        try {
+          final req = await client.post('localhost', server.port, '/');
+          req.headers.set('content-type', contentType);
+          // No content-length, so the limit is checked while streaming.
+          req.write('x' * 64);
+          final res = await req.close();
+          expect(res.statusCode, 413);
+        } finally {
+          client.close(force: true);
+          await app.close(force: true);
+        }
+      });
+    }
+  });
+
+  // ─── Memory: big bodies and files ────────────────────────────
+
+  group('Big bodies and files fit in a 64 MB heap', () {
+    // Bytes kept in a List<int> cost 8 bytes each plus room to grow, which
+    // runs out of memory under this cap. Bytes kept as bytes fit easily.
+    const mb = 1 << 20;
+    late Process server;
+    late Directory dir;
+    late Uri base;
+    final client = HttpClient();
+
+    setUpAll(() async {
+      dir = await Directory.systemTemp.createTemp('quadrant_heap_');
+      await File('${dir.path}/big.bin').writeAsBytes(Uint8List(80 * mb));
+      server = await Process.start(Platform.resolvedExecutable, [
+        '--old_gen_heap_size=64',
+        'test/fixtures/heap_capped_server.dart',
+        dir.path,
+      ]);
+      server.stderr.listen(stderr.add); // shows an OutOfMemoryError, if any
+      final port = await server.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .first;
+      base = Uri.parse('http://localhost:$port');
+    });
+
+    tearDownAll(() async {
+      client.close(force: true);
+      server.kill();
+      await dir.delete(recursive: true);
+    });
+
+    Future<String> post(
+        String path, String contentType, List<List<int>> parts) async {
+      final req = await client.postUrl(base.resolve(path));
+      req.headers.set('content-type', contentType);
+      parts.forEach(req.add);
+      final res = await req.close();
+      return '${res.statusCode} ${await res.transform(utf8.decoder).join()}';
+    }
+
+    test('bodyParser reads an 8 MB JSON body', () async {
+      final body = utf8.encode('{"s":"${'a' * (8 * mb)}"}');
+      expect(await post('/json', 'application/json', [body]), '200 ${8 * mb}');
+    });
+
+    test('formParser reads an 8 MB form body', () async {
+      final body = utf8.encode('s=${'a' * (8 * mb)}');
+      expect(
+        await post('/form', 'application/x-www-form-urlencoded', [body]),
+        '200 ${8 * mb}',
+      );
+    });
+
+    test('multipartParser reads an 8 MB file', () async {
+      final parts = [
+        utf8.encode('--b\r\nContent-Disposition: form-data; name="f"; '
+            'filename="a.bin"\r\n\r\n'),
+        Uint8List(8 * mb),
+        utf8.encode('\r\n--b--\r\n'),
+      ];
+      expect(
+        await post('/upload', 'multipart/form-data; boundary=b', parts),
+        '200 ${8 * mb}',
+      );
+    });
+
+    test('staticFiles serves an 80 MB file', () async {
+      final res =
+          await (await client.getUrl(base.resolve('/static/big.bin'))).close();
+      final received = await res.fold<int>(0, (n, chunk) => n + chunk.length);
+      expect(
+        '${res.statusCode} ${res.contentLength} $received',
+        '200 ${80 * mb} ${80 * mb}',
+      );
+    });
+  });
+}
+
+/// Polls [condition] every 20 ms, for up to 2 seconds.
+Future<void> _waitUntil(bool Function() condition) async {
+  for (var i = 0; i < 100 && !condition(); i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
 }
 
 // ─── Fake Request (no dart:io required) ──────────────────────

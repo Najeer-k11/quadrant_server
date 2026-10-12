@@ -99,16 +99,17 @@ Middleware multipartParser({
       }
 
       // Read the body, enforcing the total size limit while streaming.
-      final bodyBytes = <int>[];
+      // BytesBuilder stores 1 byte per byte; a List<int> would use 8.
+      final bodyBytes = BytesBuilder(copy: false);
       await for (final chunk in req.raw) {
-        bodyBytes.addAll(chunk);
+        bodyBytes.add(chunk);
         if (maxTotalBytes > 0 && bodyBytes.length > maxTotalBytes) {
           return _tooLarge(maxTotalBytes);
         }
       }
 
       final result = _parseMultipart(
-        Uint8List.fromList(bodyBytes),
+        bodyBytes.takeBytes(),
         boundary,
         maxFileSize,
       );
@@ -230,7 +231,7 @@ _MultipartResult? _parseMultipart(
         fieldName: partName,
         filename: filename,
         mimeType: mimeType,
-        bytes: Uint8List.fromList(partBytes),
+        bytes: partBytes, // sublist already made a copy
       ));
     } else {
       // Text field.
