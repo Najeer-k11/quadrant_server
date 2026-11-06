@@ -1,9 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
-import '../middleware.dart';
-import '../request.dart';
-import '../stream_response.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/stream_response.dart';
 
 /// Gzip response compression middleware.
 ///

@@ -1,7 +1,7 @@
 import 'dart:math';
 
-import '../middleware.dart';
-import '../request.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
 
 /// Request ID middleware.
 ///
@@ -47,19 +47,32 @@ Middleware requestId({
 
 final _rng = Random.secure();
 
-/// Generates a random UUID v4 string.
-String _uuid() {
-  final b = List<int>.generate(16, (_) => _rng.nextInt(256));
-  b[6] = (b[6] & 0x0f) | 0x40; // version 4
-  b[8] = (b[8] & 0x3f) | 0x80; // variant 1
+final _hexByte = [
+  for (var i = 0; i < 256; i++) i.toRadixString(16).padLeft(2, '0'),
+];
 
-  String h(int n) => n.toRadixString(16).padLeft(2, '0');
-  return '${h(b[0])}${h(b[1])}${h(b[2])}${h(b[3])}'
-      '-${h(b[4])}${h(b[5])}'
-      '-${h(b[6])}${h(b[7])}'
-      '-${h(b[8])}${h(b[9])}'
-      '-${h(b[10])}${h(b[11])}${h(b[12])}${h(b[13])}${h(b[14])}${h(b[15])}';
+/// Generates a random UUID v4 string.
+///
+/// Each call to the secure generator is expensive, so it takes four 32-bit
+/// values rather than sixteen single bytes.
+String _uuid() {
+  final a = _rng.nextInt(_twoTo32);
+  final b = _rng.nextInt(_twoTo32);
+  final c = _rng.nextInt(_twoTo32);
+  final d = _rng.nextInt(_twoTo32);
+
+  String h(int word, int shift) => _hexByte[(word >> shift) & 0xff];
+  final version = (b >> 8) & 0x0f | 0x40; // version 4
+  final variant = (c >> 24) & 0x3f | 0x80; // variant 1
+
+  return '${h(a, 24)}${h(a, 16)}${h(a, 8)}${h(a, 0)}'
+      '-${h(b, 24)}${h(b, 16)}'
+      '-${_hexByte[version]}${h(b, 0)}'
+      '-${_hexByte[variant]}${h(c, 16)}'
+      '-${h(c, 8)}${h(c, 0)}${h(d, 24)}${h(d, 16)}${h(d, 8)}${h(d, 0)}';
 }
+
+const _twoTo32 = 1 << 32;
 
 // ─── Context propagation ──────────────────────────────────────
 

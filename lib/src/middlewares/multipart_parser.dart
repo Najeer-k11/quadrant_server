@@ -1,9 +1,9 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import '../middleware.dart';
-import '../request.dart';
-import '../response.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
 
 /// Represents a single uploaded file from a multipart form.
 class UploadedFile {

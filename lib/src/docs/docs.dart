@@ -1,9 +1,10 @@
 import 'dart:convert';
 
-import 'request.dart';
-import 'response.dart';
-import 'route.dart';
-import 'websocket_route.dart';
+import '../core/request.dart';
+import '../core/response.dart';
+import '../routing/route.dart';
+import '../validation/validator.dart';
+import '../realtime/websocket_route.dart';
 
 /// Returns a [Handler] that serves the Swagger UI docs page.
 ///
@@ -32,6 +33,7 @@ Handler docsHandler(
               'path': r.path,
               'params': r.paramNames,
               'middlewares': r.middlewares.length,
+              'schema': _routeSchema(r),
             })
         .toList();
 
@@ -43,6 +45,15 @@ Handler docsHandler(
       headers: {'content-type': 'text/html; charset=utf-8'},
     );
   };
+}
+
+/// The request body schema of [route], if it uses `validate()`.
+Map<String, dynamic>? _routeSchema(Route route) {
+  for (final middleware in route.middlewares.reversed) {
+    final schema = schemaOf(middleware);
+    if (schema != null) return schema.toJsonSchema();
+  }
+  return null;
 }
 
 /// Builds the full HTML page embedding Swagger UI with the generated OpenAPI spec.
@@ -220,6 +231,7 @@ String _buildOpenApiSpec(List<Map<String, dynamic>> routes) {
     final path = route['path'] as String;
     final method = (route['method'] as String).toLowerCase();
     final params = route['params'] as List<String>;
+    final schema = route['schema'] as Map<String, dynamic>?;
 
     // Convert :id style to {id} style (OpenAPI standard)
     final openApiPath = path.replaceAllMapped(
@@ -238,8 +250,16 @@ String _buildOpenApiSpec(List<Map<String, dynamic>> routes) {
                 'schema': {'type': 'string'},
               })
           .toList(),
+      if (schema != null)
+        'requestBody': {
+          'required': true,
+          'content': {
+            'application/json': {'schema': schema},
+          },
+        },
       'responses': {
         '200': {'description': 'Success'},
+        if (schema != null) '422': {'description': 'Validation failed'},
       },
       'x-codeSamples': _generateCodeSamples(method, openApiPath, params),
     };
@@ -254,7 +274,9 @@ String _buildOpenApiSpec(List<Map<String, dynamic>> routes) {
     'paths': paths,
   };
 
-  return jsonEncode(spec);
+  // Embedded in a <script>, so a `</script>` in a path or validation pattern
+  // must not end it.
+  return jsonEncode(spec).replaceAll('</', r'<\/');
 }
 
 /// Generates auto-generated code samples for Dart, cURL, JavaScript, and Python.

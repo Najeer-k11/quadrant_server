@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'request.dart';
-import 'response.dart';
+import '../core/request.dart';
+import '../core/response.dart';
 
 /// Server-Sent Events (SSE) context for push-based HTTP streaming.
 ///
@@ -72,6 +72,7 @@ class SseContext {
     httpResponse.bufferOutput = false;
 
     final ctx = SseContext._(httpResponse);
+    _sseTrackers[req.raw]?.call(ctx);
 
     // Mark done when the client disconnects.
     unawaited(req.raw.response.done.then((_) {
@@ -154,10 +155,13 @@ class SseContext {
 
   /// Closes the SSE stream from the server side.
   Future<void> close() async {
-    if (!_done.isCompleted) {
+    if (_done.isCompleted) return;
+    try {
       await _httpResponse.close();
-      _done.complete();
+    } catch (_) {
+      // Client already gone.
     }
+    if (!_done.isCompleted) _done.complete();
   }
 
   /// A sentinel [Response] to return from the route handler after the SSE
@@ -165,6 +169,19 @@ class SseContext {
   /// so the no-op attempt to write this sentinel to an already-closed
   /// connection is silently swallowed.
   Response get response => const Response(statusCode: 200);
+}
+
+final _sseTrackers = Expando<void Function(SseContext)>('quadrant_sse');
+
+/// Tells the server about SSE streams started on [rawRequest], so it can end
+/// them on shutdown.
+///
+/// This is an **internal** API — not part of the public surface.
+void registerSseTracker(
+  Object rawRequest,
+  void Function(SseContext stream) tracker,
+) {
+  _sseTrackers[rawRequest] = tracker;
 }
 
 /// Sends a keep-alive comment ping on [interval] until the connection closes.

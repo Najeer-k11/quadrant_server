@@ -1,21 +1,26 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'docs.dart';
+import '../cluster/cluster_link.dart';
+import '../docs/docs.dart';
 import 'middleware.dart';
 import 'request.dart';
 import 'response.dart';
-import 'route.dart';
-import 'router.dart';
+import '../routing/route.dart';
+import '../routing/router.dart';
+import '../realtime/sse_context.dart';
 import 'stream_response.dart';
-import 'websocket_context.dart';
-import 'websocket_route.dart';
-import 'middlewares/bearer_auth.dart';
-import 'middlewares/body_parser.dart';
-import 'middlewares/cookie_parser.dart';
-import 'middlewares/multipart_parser.dart';
-import 'middlewares/request_id.dart';
+import 'version.dart';
+import '../realtime/websocket_context.dart';
+import '../realtime/websocket_route.dart';
+import '../middlewares/bearer_auth.dart';
+import '../middlewares/body_parser.dart';
+import '../middlewares/cookie_parser.dart';
+import '../middlewares/cors.dart';
+import '../middlewares/multipart_parser.dart';
+import '../middlewares/request_id.dart';
 
 /// Error handler type — receives the error and the request, returns a Response.
 typedef ErrorHandler = Response Function(Object error, Request req);
@@ -76,6 +81,13 @@ class QuadrantServer {
   int _inFlightCount = 0;
   Completer<void>? _activeCompleter;
 
+  // ─── Long-lived connections ──────────────────────────────────
+
+  // These never finish by themselves, so close() has to end them.
+  final Set<WebSocketContext> _webSockets = {};
+  final Set<SseContext> _sseStreams = {};
+  bool _closing = false;
+
   QuadrantServer({
     this.middlewares = const [],
     required this.routes,
@@ -124,12 +136,20 @@ class QuadrantServer {
 
   // ─── Server start ─────────────────────────────────────────────
 
+  /// The number of requests this server has received.
+  int get requestCount => _requestCount;
+
   /// Binds an HTTP server to [port] and starts handling requests.
+  ///
+  /// [shared] lets several isolates bind the same port. To run on several
+  /// isolates, use `QuadrantCluster`, which also keeps their state in step.
   Future<HttpServer> listen({
     required int port,
     dynamic address = '0.0.0.0',
+    bool shared = false,
   }) async {
-    _server = await HttpServer.bind(address, port);
+    _closing = false;
+    _server = await HttpServer.bind(address, port, shared: shared);
     _server!.listen(_handleRequest);
     _printBanner('http://localhost:$port');
     return _server!;
@@ -154,12 +174,15 @@ class QuadrantServer {
     required File privateKey,
     String? password,
     dynamic address = '0.0.0.0',
+    bool shared = false,
   }) async {
     final context = SecurityContext();
     context.useCertificateChain(certificateChain.path, password: password);
     context.usePrivateKey(privateKey.path, password: password);
 
-    _server = await HttpServer.bindSecure(address, port, context);
+    _closing = false;
+    _server =
+        await HttpServer.bindSecure(address, port, context, shared: shared);
     _server!.listen(_handleRequest);
     _printBanner('https://localhost:$port');
     return _server!;
@@ -167,30 +190,57 @@ class QuadrantServer {
 
   /// Gracefully shuts down the server.
   ///
-  /// If [force] is `false` (default), closes the listening socket immediately
-  /// (no new connections accepted) but **waits for all in-flight requests** to
-  /// complete before returning.
+  /// Closes the listening socket, so no new connections are accepted, and ends
+  /// open WebSockets (with code `1001`) and SSE streams, which would otherwise
+  /// stay open for as long as their clients do. It then **waits for all
+  /// in-flight requests** to finish, including any [StreamResponse] that is
+  /// still sending.
   ///
-  /// If [force] is `true`, closes immediately regardless of in-flight requests.
-  Future<void> close({bool force = false}) async {
-    await _server?.close(force: force);
+  /// [timeout] limits that wait. When it runs out, the remaining connections
+  /// are destroyed. Without one, a client that stops reading a large response
+  /// can hold up shutdown until the connection fails.
+  ///
+  /// If [force] is `true`, connections are destroyed immediately regardless of
+  /// in-flight requests.
+  Future<void> close({bool force = false, Duration? timeout}) async {
+    final server = _server;
     _server = null;
+    _closing = true;
+    await server?.close(force: force);
 
-    if (!force && _inFlightCount > 0) {
-      // Wait for all in-flight requests to complete.
-      _activeCompleter = Completer<void>();
-      await _activeCompleter!.future;
+    for (final socket in List.of(_webSockets)) {
+      unawaited(socket
+          .close(WebSocketStatus.goingAway, 'Server shutting down')
+          .catchError((_) {}));
+    }
+    for (final stream in List.of(_sseStreams)) {
+      unawaited(stream.close());
+    }
+
+    if (force || _inFlightCount == 0) return;
+
+    final drained = (_activeCompleter ??= Completer<void>()).future;
+    if (timeout == null) {
+      await drained;
+      return;
+    }
+    try {
+      await drained.timeout(timeout);
+    } on TimeoutException {
+      await server?.close(force: true);
     }
   }
 
   void _printBanner(String url) {
     if (!docs && !healthCheck) return;
+    // Once per cluster rather than once per isolate.
+    if ((currentClusterLink?.index ?? 0) > 0) return;
     final routePad = max(0, 24 - routes.length.toString().length);
     final wsPad = max(0, 24 - webSocketRoutes.length.toString().length);
     // ignore: avoid_print
     print('┌─────────────────────────────────────────┐');
     // ignore: avoid_print
-    print('│         QuadrantServer v2.5.2            │');
+    print('│         QuadrantServer v$quadrantVersion            │');
     // ignore: avoid_print
     print('├─────────────────────────────────────────┤');
     // ignore: avoid_print
@@ -218,6 +268,7 @@ class QuadrantServer {
     _inFlightCount++;
 
     Request request = Request.fromHttpRequest(httpRequest);
+    registerSseTracker(httpRequest, _trackSse);
 
     try {
       // Built-in health check — intercept before router.
@@ -228,13 +279,16 @@ class QuadrantServer {
             DateTime.now().difference(_startTime).inSeconds;
         final memMb =
             (ProcessInfo.currentRss / (1024 * 1024)).toStringAsFixed(1);
-        _writeResponse(
+        final link = currentClusterLink;
+        final requests = await link?.totalRequests() ?? _requestCount;
+        final isolates = link == null ? '' : ',"isolates":${link.isolateCount}';
+        await _writeResponse(
           httpRequest.response,
           Response(
             statusCode: 200,
             headers: {'content-type': 'application/json'},
             body: '{"status":"ok","uptime":$uptime,'
-                '"requests":$_requestCount,"memoryMb":$memMb}',
+                '"requests":$requests,"memoryMb":$memMb$isolates}',
           ),
         );
         return;
@@ -251,18 +305,27 @@ class QuadrantServer {
 
       switch (result) {
         case NotFound():
-          _writeResponse(
-              httpRequest.response, Response.notFound('Route not found'));
+          await _respondUnmatched(
+              Response.notFound('Route not found'), request, httpRequest);
           return;
 
-        case MethodNotAllowed(:final allowedMethods):
-          _writeResponse(
-            httpRequest.response,
+        case MalformedPath():
+          await _respondUnmatched(
+              Response.badRequest('Malformed URL path'), request, httpRequest);
+          return;
+
+        case MethodNotAllowed(:final allowedMethods, :final routes):
+          await _respondUnmatched(
             Response(
               statusCode: 405,
               headers: {'allow': allowedMethods.join(', ')},
               body: '{"error":"Method not allowed"}',
             ),
+            request,
+            httpRequest,
+            routeMiddlewares: request.method == 'OPTIONS'
+                ? _preflightMiddlewares(routes)
+                : const [],
           );
           return;
 
@@ -271,16 +334,19 @@ class QuadrantServer {
           final allMiddlewares = [...middlewares, ...route.middlewares];
           final response = await _executeChain(
               allMiddlewares, 0, request, route.handler, httpRequest);
-          _writeResponse(httpRequest.response, response);
+          await _writeResponse(httpRequest.response, response);
 
         case MatchedWebSocket(:final route, :final params):
-          final wsRequest = request.copyWith(params: params);
+          var wsRequest = request.copyWith(params: params);
           final middlewareChain = [...middlewares, ...route.middlewares];
           final rejected = await _runMiddlewareChainForUpgrade(
-              wsRequest, middlewareChain, 0, httpRequest);
+              wsRequest, middlewareChain, 0, httpRequest, (updated) {
+            // Keeps what the middlewares added, such as the bearerAuth() user.
+            wsRequest = updated;
+          });
 
           if (rejected != null) {
-            _writeResponse(httpRequest.response, rejected);
+            await _writeResponse(httpRequest.response, rejected);
             return;
           }
 
@@ -288,12 +354,12 @@ class QuadrantServer {
             final ctx = await WebSocketContext.fromUpgrade(wsRequest);
             await _handleWebSocket(ctx, route);
           } catch (error) {
-            _writeResponse(httpRequest.response,
+            await _writeResponse(httpRequest.response,
                 _errorResponse(error, wsRequest, 'WebSocket upgrade failed'));
           }
       }
     } catch (error) {
-      _writeResponse(httpRequest.response,
+      await _writeResponse(httpRequest.response,
           _errorResponse(error, request, 'Internal server error'));
     } finally {
       RequestHolder.instance.consumeParsedBody(httpRequest);
@@ -303,6 +369,44 @@ class QuadrantServer {
         _activeCompleter = null;
       }
     }
+  }
+
+  /// Sends [response] through the global middlewares, so that requests matching
+  /// no route also get security headers, logging, rate limiting and so on.
+  Future<void> _respondUnmatched(
+    Response response,
+    Request request,
+    HttpRequest httpRequest, {
+    List<Middleware> routeMiddlewares = const [],
+  }) async {
+    final result = await _executeChain(
+      [...middlewares, ...routeMiddlewares],
+      0,
+      request,
+      (_) async => response,
+      httpRequest,
+    );
+    await _writeResponse(httpRequest.response, result);
+  }
+
+  /// The `cors()` on a path's routes, which has to answer its preflights. A
+  /// preflight is an `OPTIONS` request, so it never matches those routes.
+  List<Middleware> _preflightMiddlewares(List<Route> routes) {
+    for (final route in routes) {
+      for (final middleware in route.middlewares) {
+        if (isCorsMiddleware(middleware)) return [middleware];
+      }
+    }
+    return const [];
+  }
+
+  void _trackSse(SseContext stream) {
+    if (_closing) {
+      unawaited(stream.close());
+      return;
+    }
+    _sseStreams.add(stream);
+    unawaited(stream.done.whenComplete(() => _sseStreams.remove(stream)));
   }
 
   /// Asks [onError] for a response; falls back to a 500 if it throws too.
@@ -341,7 +445,7 @@ class QuadrantServer {
   }
 
   /// Applies all pending context overrides (body, bearerAuth, requestId,
-  /// cookieParser, multipartParser) to [request].
+  /// cookieParser, multipartParser, Request.setContext) to [request].
   Request _applyOverrides(Request request, HttpRequest rawRequest) {
     final parsedBody = RequestHolder.instance.consumeParsedBody(rawRequest);
     if (parsedBody != null) request = request.copyWith(body: parsedBody);
@@ -353,6 +457,7 @@ class QuadrantServer {
       consumeRequestIdContext,      // requestId
       consumeCookieContext,         // cookieParser
       consumeMultipartContext,      // multipartParser
+      consumeSetContext,            // Request.setContext
     ]) {
       final ctx = consume(rawRequest);
       if (ctx != null) request = request.copyWith(context: ctx);
@@ -366,10 +471,14 @@ class QuadrantServer {
     List<Middleware> middlewareList,
     int index,
     HttpRequest rawRequest,
+    void Function(Request request) onChainEnd,
   ) async {
     request = _applyOverrides(request, rawRequest);
 
-    if (index >= middlewareList.length) return null;
+    if (index >= middlewareList.length) {
+      onChainEnd(request);
+      return null;
+    }
 
     final middleware = middlewareList[index];
     bool nextCalled = false;
@@ -379,7 +488,7 @@ class QuadrantServer {
       nextCalled = true;
       final updated = _applyOverrides(request, rawRequest);
       chainResult = await _runMiddlewareChainForUpgrade(
-          updated, middlewareList, index + 1, rawRequest);
+          updated, middlewareList, index + 1, rawRequest, onChainEnd);
       return const Response(statusCode: 204);
     });
 
@@ -391,6 +500,16 @@ class QuadrantServer {
 
   Future<void> _handleWebSocket(
       WebSocketContext ctx, WebSocketRoute route) async {
+    _webSockets.add(ctx);
+    unawaited(ctx.socket.done
+        .whenComplete(() => _webSockets.remove(ctx))
+        .catchError((_) {}));
+    if (_closing) {
+      unawaited(ctx
+          .close(WebSocketStatus.goingAway, 'Server shutting down')
+          .catchError((_) {}));
+    }
+
     if (route.onStart != null) {
       try {
         await route.onStart!(ctx);
@@ -472,7 +591,10 @@ class QuadrantServer {
 
   // ─── Response writing ─────────────────────────────────────────
 
-  void _writeResponse(HttpResponse httpResponse, Response response) {
+  /// Completes once the response has been handed to the socket, so a request
+  /// counts as in flight until then.
+  Future<void> _writeResponse(
+      HttpResponse httpResponse, Response response) async {
     try {
       httpResponse.statusCode = response.statusCode;
 
@@ -483,22 +605,33 @@ class QuadrantServer {
         httpResponse.headers.add('set-cookie', cookie);
       }
 
-      // Check if this is a StreamResponse — pipe stream directly.
       if (response is StreamResponse) {
-        unawaited(response.stream
-            .pipe(httpResponse)
-            .catchError((_) {})
-            .then((_) => httpResponse.close().catchError((_) {})));
-        return;
+        await httpResponse.addStream(_guardListen(response.stream));
+      } else if (response.body.isNotEmpty) {
+        // Not write(): without a charset in the content-type, it encodes as
+        // Latin-1, which corrupts JSON and throws on most of Unicode.
+        final charset = httpResponse.headers.contentType?.charset;
+        final encoding =
+            charset == null ? null : Encoding.getByName(charset);
+        httpResponse.add((encoding ?? utf8).encode(response.body));
       }
 
-      if (response.body.isNotEmpty) {
-        httpResponse.write(response.body);
-      }
-
-      httpResponse.close();
+      await httpResponse.close();
     } catch (_) {
-      // Connection already closed or handed to a WebSocket — nothing to do.
+      // Client disconnected, the stream failed, or the connection was already
+      // closed or handed to a WebSocket. Nothing more can be sent.
+      try {
+        unawaited(httpResponse.close().then((_) {}, onError: (_) {}));
+      } catch (_) {
+        // Handed to a WebSocket: there is no response left to close.
+      }
     }
   }
+}
+
+/// Turns a failure to start [source], such as a single-subscription stream
+/// that is already in use, into an error event. Thrown directly, it would leave
+/// the response bound to a stream that never ends, so it could never close.
+Stream<List<int>> _guardListen(Stream<List<int>> source) async* {
+  yield* source;
 }

@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import '../middleware.dart';
-import '../request.dart';
-import '../response.dart';
-import '../middlewares/body_parser.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
+import 'body_parser.dart';
 
 /// Form body parser middleware.
 ///

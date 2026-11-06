@@ -1,69 +1,72 @@
 # QuadrantServer
 
-A Dart-first, batteries-included HTTP server framework built directly on `dart:io` with **zero external dependencies**.
-
-[![pub package](https://img.shields.io/pub/v/quadrant_server.svg)](https://pub.dev/packages/quadrant_server)
+[![pub version](https://img.shields.io/pub/v/quadrant_server.svg?label=pub.dev)](https://pub.dev/packages/quadrant_server)
+[![pub points](https://img.shields.io/pub/points/quadrant_server)](https://pub.dev/packages/quadrant_server/score)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+A batteries-included HTTP server framework for Dart, built directly on `dart:io` with **no runtime dependencies**.
 
-- **Dart-first** — Named parameters, strong types, null safety
-- **Functional responses** — Handlers return `Response` objects, never mutate
-- **Declarative config** — Everything declared upfront in `QuadrantServer()`
-- **Zero dependencies** — Pure Dart (`dart:io` + `dart:async` only)
-- **Middleware system** — Global and route-level, short-circuiting, context propagation
-- **Path parameters & Wildcards** — `/users/:id` extracts `params['id']`, `/files/*` captures rest
-- **Route grouping** — `QuadrantRouter` for prefix-mounted route modules
-- **Built-in Middlewares (14 total)**:
-  - `cors()` — Cross-Origin Resource Sharing with preflight caching & `maxAge`
-  - `logger()` — Structured request logging with custom sinks
-  - `bodyParser()` — JSON parser with payload size limits (`413`)
-  - `rateLimit()` — Sliding-window rate limiting
-  - `bearerAuth()` — Bearer token authentication & principal injection
-  - `staticFiles()` — Path-traversal-safe file server with ETag & 304 caching
-  - `requestId()` — Automatic UUID v4 tracing & header propagation
-  - `helmet()` — 8 essential web security headers
-  - `timeout()` — Request cancellation with custom `408` timeout response
-  - `cookieParser()` — Parses `Cookie` header & provides cookie setters
-  - `formParser()` — Parses `application/x-www-form-urlencoded` forms
-  - `ipFilter()` — CIDR and exact IP allow/deny lists
-  - `compress()` — Gzip compression with `Accept-Encoding` negotiation
-  - `etag()` — Weak ETag caching and `If-None-Match` handling
-  - `multipartParser()` — File uploads & multipart form decoding
-- **Real-time**:
-  - **Server-Sent Events (`SseContext`)** — Event streaming with keep-alive pings
-  - **WebSockets (`WebSocketRoute`)** — Upgrades, callbacks, and automatic heartbeat ping/pong
-  - **`WebSocketGroup`** — Room/channel broadcasting utility
-- **Streaming Responses** — `StreamResponse` to pipe streams without buffering in memory
-- **Schema Validation** — `BodySchema` + `validate()` middleware for typed request validation (`422`)
-- **Operations & Security**:
-  - **HTTPS / TLS** — `listenSecure()` with certificate chains
-  - **Graceful shutdown** — `close()` drains in-flight requests cleanly
-  - **Health check** — Built-in `/health` endpoint reporting uptime, requests, and memory
-  - **Auto-generated docs** — Swagger UI at `/quadrant_docs` (loopback-only by default)
+Handlers take a `Request` and return a `Response`. Routes, middleware, WebSockets and server options are all declared up front, so you can read how a server behaves in one place.
+
+```dart
+final app = QuadrantServer(
+  middlewares: [helmet(), logger(), bodyParser()],
+  routes: [
+    Route.get(path: '/users/:id', handler: getUser),
+    Route.post(path: '/users', handler: createUser, middlewares: [validate(userSchema)]),
+  ],
+);
+```
+
+## What's included
+
+| Area | Features |
+|---|---|
+| **Routing** | Path params, wildcards, route groups, automatic `404`, `405` and `HEAD` |
+| **Middleware** | 15 built in: security headers, CORS, auth, rate limiting, body parsing, uploads, compression, caching and more |
+| **Real-time** | WebSockets with rooms and heartbeats, Server-Sent Events |
+| **Validation** | Schemas with nested objects, typed values and field-level errors |
+| **Multi-core** | One server per isolate on a single port, with rate limits and broadcasts shared between them |
+| **Operations** | TLS, graceful shutdown, health check, generated Swagger UI docs, streaming responses |
+
+## Contents
+
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Routes](#routes)
+- [Requests and responses](#requests-and-responses)
+- [Middleware](#middleware)
+- [Request validation](#request-validation)
+- [Static files and streaming](#static-files-and-streaming)
+- [Real-time](#real-time)
+- [Using every CPU core](#using-every-cpu-core)
+- [Running in production](#running-in-production)
+- [Known limitations](#known-limitations)
+- [Development](#development)
 
 ---
 
-## Quick Start
+## Installation
+
+Requires Dart 3.0 or later. It needs `dart:io`, so it runs on servers and desktops, not on the web.
+
+```bash
+dart pub add quadrant_server
+```
+
+This adds the latest version, which is shown on the badge above. See the [changelog](CHANGELOG.md) for what changed in each release.
+
+## Quick start
 
 ```dart
 import 'package:quadrant_server/quadrant_server.dart';
 
-Future<Response> getUsers(Request req) async {
-  return Response.ok([
-    {'id': '1', 'name': 'Ada'},
-    {'id': '2', 'name': 'Grace'},
-  ]);
-}
-
 Future<Response> getUser(Request req) async {
-  final id = req.params['id'];
-  return Response.ok({'id': id, 'name': 'Ada'});
+  return Response.ok({'id': req.params['id'], 'name': 'Ada'});
 }
 
 Future<Response> createUser(Request req) async {
-  final body = req.bodyAsMap;
-  return Response.created(body ?? {});
+  return Response.created(req.bodyAsMap ?? {});
 }
 
 void main() async {
@@ -71,128 +74,104 @@ void main() async {
     middlewares: [
       requestId(),
       helmet(),
-      cors(),
       logger(),
-      bodyParser(maxBodyBytes: 1024 * 1024), // 1MB limit
+      bodyParser(), // Fills req.body from JSON requests, up to 1 MB
     ],
     routes: [
-      Route.get(path: '/users', handler: getUsers),
       Route.get(path: '/users/:id', handler: getUser),
       Route.post(path: '/users', handler: createUser),
     ],
-    healthCheck: true, // Enables GET /health
-    docs: true,        // Enables GET /quadrant_docs
+    healthCheck: true, // GET /health
+    docs: true,        // GET /quadrant_docs, from this machine only
   );
 
   await app.listen(port: 3000);
-  print('Server running on http://localhost:3000');
 }
 ```
 
----
-
-## Installation
-
-Add to your `pubspec.yaml`:
-
-```yaml
-dependencies:
-  quadrant_server: ^2.5.2
-```
-
-Then run:
-
 ```bash
-dart pub get
+curl localhost:3000/users/42
+# {"id":"42","name":"Ada"}
+
+curl -X POST localhost:3000/users -H 'content-type: application/json' -d '{"name":"Grace"}'
+# {"name":"Grace"}
 ```
+
+The [`example/`](example) directory has a larger app with authentication, CRUD routes, chat rooms and a Dockerfile.
 
 ---
 
-## Core Concepts
-
-### Routes
-
-Define routes using named constructors for each HTTP method:
+## Routes
 
 ```dart
 Route.get(path: '/users', handler: getUsers)
 Route.post(path: '/users', handler: createUser)
 Route.put(path: '/users/:id', handler: updateUser)
-Route.delete(path: '/users/:id', handler: deleteUser)
 Route.patch(path: '/users/:id', handler: patchUser)
+Route.delete(path: '/users/:id', handler: deleteUser)
+
+// Any other method:
+Route(method: 'OPTIONS', path: '/users', handler: usersOptions)
 ```
 
-**Wildcard segments** — capture everything after a prefix:
+- **Path params:** `/users/:id` puts the decoded value in `req.params['id']`. A value that is not valid UTF-8, such as `/users/%FF`, gets a `400`.
+- **Wildcards:** `/files/*` matches `/files/a/b` and puts `a/b` in `req.params['*']`. A wildcard goes at the end of the path.
+- **Matching order:** the first registered route that matches wins, so put `/users/me` before `/users/:id`.
+- **Slashes:** `/users/` and `/users` are the same route.
+- **`HEAD`:** handled by the matching `GET` route if there is no `HEAD` route.
+
+### Route groups
+
+`QuadrantRouter` puts a shared prefix and shared middleware on a group of routes:
 
 ```dart
-Route.get(path: '/files/*', handler: serveFile)
-// GET /files/images/logo.png → req.params['*'] == 'images/logo.png'
-```
-
-### Route Grouping — `QuadrantRouter`
-
-Organise large apps into prefix-mounted modules without repeating path segments:
-
-```dart
-final apiRouter = QuadrantRouter(prefix: '/api/v1')
-  ..get('/users', getUsers)
-  ..post('/users', createUser)
-  ..get('/users/:id', getUser)
-  ..delete('/users/:id', deleteUser);
+final admin = QuadrantRouter(
+  prefix: '/admin',
+  middlewares: [bearerAuth(validate: findAdmin)],
+)
+  ..get('/users', listUsers)
+  ..delete('/users/:id', deleteUser)
+  ..ws('/live', onMessage: onLiveMessage, heartbeat: Duration(seconds: 30));
 
 final app = QuadrantServer(
-  middlewares: [cors(), logger()],
-  routes: [
-    ...apiRouter.routes,
-  ],
+  routes: [...admin.routes],
+  webSocketRoutes: [...admin.webSocketRoutes],
 );
 ```
 
-Router-level middlewares run before every route in that router:
-
-```dart
-final adminRouter = QuadrantRouter(
-  prefix: '/admin',
-  middlewares: [bearerAuth(validate: myValidator)], // runs on all /admin routes
-)
-  ..get('/dashboard', dashboardHandler)
-  ..get('/users', listUsersHandler);
-```
+## Requests and responses
 
 ### Request
 
-Immutable wrapper around `dart:io` `HttpRequest`:
-
 ```dart
-Future<Response> handler(Request req) async {
-  req.method;         // 'GET', 'POST', etc.
-  req.path;           // '/users/123'
-  req.params;         // {'id': '123'} — path params
-  req.query;          // {'page': '1'} — raw query string map
-  req.headers;        // {'content-type': 'application/json'}
-  req.body;           // dynamic — Map, List, or null
-  req.bodyAsMap;      // Map<String, dynamic>? — safe cast
-  req.bodyAsList;     // List? — safe cast
-  req.context;        // Map<String, dynamic> — middleware-injected data
-  req.raw;            // dart:io HttpRequest escape hatch
+req.method;      // 'GET'
+req.path;        // '/users/123'
+req.params;      // {'id': '123'}
+req.query;       // {'page': '1'}
+req.headers;     // {'content-type': 'application/json'}, with lowercase names
+req.body;        // Parsed body, once a body parser has run
+req.bodyAsMap;   // Map<String, dynamic>?, null for anything else
+req.bodyAsList;  // List<dynamic>?, null for anything else
+req.context;     // Values added by middleware
+req.raw;         // The dart:io HttpRequest, if you need it
 
-  // Typed query helpers
-  req.queryString('sort', defaultValue: 'asc');  // String
-  req.queryInt('page', defaultValue: 1);          // int?
-  req.queryDouble('lat');                          // double?
-  req.queryBool('active', defaultValue: true);    // bool?
-}
+req.queryString('sort', defaultValue: 'asc');
+req.queryInt('page', defaultValue: 1);
+req.queryDouble('lat');
+req.queryBool('active', defaultValue: true); // true/1/yes, false/0/no
 ```
+
+`req.body` stays `null` unless `bodyParser()`, `formParser()` or similar has run.
 
 ### Response
 
-Immutable. Always returned from handlers, never mutated:
+Responses are immutable. Maps and lists are encoded as JSON, and text is sent as UTF-8 unless your `content-type` names another charset.
 
 ```dart
-Response.ok(data)                       // 200 — Map/List auto-JSON-encoded
+Response.ok(data)                       // 200
 Response.created(data)                  // 201
 Response.noContent()                    // 204
-Response.redirect('/new-path')          // 302 (or 301, 307, 308)
+Response.redirect('/new-path')          // 302, or pass statusCode: 301, 307 or 308
 Response.text('plain text')             // 200 text/plain
 Response.html('<h1>Hello</h1>')         // 200 text/html
 Response.badRequest('message')          // 400
@@ -201,128 +180,148 @@ Response.forbidden('message')           // 403
 Response.notFound('message')            // 404
 Response.conflict('message')            // 409
 Response.unprocessableEntity('message') // 422
-Response.internalServerError('msg')     // 500
+Response.internalServerError('message') // 500
+
+// Anything else:
+Response(statusCode: 202, headers: {'x-job': '42'}, body: 'Queued')
 ```
 
-#### Setting & Clearing Cookies
+The body is a `String`. For binary data, use [`StreamResponse`](#streaming-responses).
 
-Use `.withCookie()` and `.clearCookie()`:
+### Cookies
 
 ```dart
 return Response.ok({'status': 'logged_in'})
     .withCookie(
       'session_id',
       token,
-      httpOnly: true,
       secure: true,
       sameSite: 'Strict',
       maxAge: Duration(days: 7),
     )
-    .withCookie('theme', 'dark');
+    .withCookie('theme', 'dark', httpOnly: false);
 
-// Clearing a cookie:
 return Response.ok({}).clearCookie('session_id');
 ```
 
----
-
-## Middlewares Reference
-
-| Middleware | Description | Key Options |
-|------------|-------------|-------------|
-| `helmet()` | Sets 8 standard HTTP security headers | `frameOptions`, `hsts`, `referrerPolicy` |
-| `requestId()` | Assigns/echoes UUID v4 tracing header & injects into context | `headerName`, `contextKey` |
-| `cors()` | Cross-Origin Resource Sharing with preflight cache | `origin`, `methods`, `allowedHeaders`, `maxAge` |
-| `rateLimit()` | Sliding-window rate limiting per IP or custom key | `maxRequests`, `window`, `keyExtractor` |
-| `bearerAuth()` | Bearer token auth; injects user into `req.context['user']` | `validate: (token) async => User?` |
-| `bodyParser()` | JSON body parser with size guard | `maxBodyBytes` (default: 1 MB) |
-| `formParser()` | Parses URL-encoded form submissions | `maxBodyBytes` (default: 64 KB) |
-| `multipartParser()` | Decodes file uploads & multipart fields into context | `maxFileSize` (default: 10 MB), `maxTotalBytes` (default: 50 MB) |
-| `cookieParser()` | Parses `Cookie` header into `req.context['cookies']` | `contextKey` |
-| `ipFilter()` | Restricts access by exact IP or CIDR block | `allow: [...]` or `deny: [...]` |
-| `compress()` | Gzip response compression with Accept-Encoding check | `minBytes` (default: 512 B) |
-| `etag()` | Automatic weak ETag caching (`304 Not Modified`) | None |
-| `staticFiles()` | Serves directory safely with MIME & ETag caching | `rootDir`, `indexFallback` |
-| `timeout()` | Cancels slow requests with `408 Request Timeout` | `duration`, `onTimeout` |
-| `logger()` | Logs method, path, status, and response time | `output: (line) => ...` |
+Cookies are `HttpOnly` and `SameSite=Lax` unless you say otherwise. Read incoming ones with `cookieParser()`.
 
 ---
 
-### Middleware Examples
+## Middleware
 
-#### Security: `helmet()`, `requestId()`, `ipFilter()`
+Global middleware runs first, in order, followed by the route's own. A middleware either calls `next()` to continue or returns a `Response` to stop there.
+
+Global middleware also runs for requests that match no route, so `404` and `405` responses get security headers and appear in your logs. A global `bearerAuth()` answers `401` for unknown paths too, which hides the routes you have, and a global `rateLimit()` counts those requests. Middleware on a route or `QuadrantRouter` only runs for that route, except that `cors()` also answers its preflights.
+
+| Middleware | What it does | Options |
+|---|---|---|
+| `helmet()` | Sets 8 security headers, including HSTS | One per header; `null` removes it |
+| `cors()` | Adds CORS headers and answers preflight `OPTIONS` requests | `origin`, `methods`, `allowedHeaders`, `maxAge` |
+| `requestId()` | Reuses or generates an ID, in `req.context['requestId']` and the response | `headerName`, `contextKey` |
+| `logger()` | Logs method, path, status and time | `output` |
+| `bearerAuth()` | Checks `Authorization: Bearer`; puts the result in `req.context['user']` | `validate`, `contextKey`, `realm` |
+| `rateLimit()` | Sliding-window limit per IP or custom key | `maxRequests`, `window`, `keyExtractor`, `trustedProxyHops` |
+| `ipFilter()` | Allows or denies exact IPs and CIDR ranges | `allow` or `deny`, `onDeny`, `trustedProxyHops` |
+| `bodyParser()` | Parses JSON into `req.body`; `400` if invalid, `413` if too large | `maxBodyBytes` (1 MB) |
+| `formParser()` | Parses URL-encoded forms into `req.body` | `maxBodyBytes` (64 KB) |
+| `multipartParser()` | Parses uploads into `req.context['files']` and `['fields']` | `maxFileSize` (10 MB), `maxTotalBytes` (50 MB) |
+| `cookieParser()` | Parses cookies into `req.context['cookies']` | `contextKey` |
+| `compress()` | Gzips responses for clients that accept it | `minBytes` (512 B) |
+| `etag()` | Adds weak ETags and answers `304 Not Modified` | None |
+| `timeout()` | Returns `408` if the handler takes too long | `duration`, `onTimeout` |
+| `validate()` | Checks the body against a schema; see [below](#request-validation) | `schema`, `contextKey` |
+
+`helmet()` sends HSTS by default. On a server that only uses HTTP, turn it off with `helmet(hsts: null)`.
+
+### Writing your own
+
+Use `req.setContext()` to pass values to later middleware, the handler and WebSocket callbacks:
 
 ```dart
-final app = QuadrantServer(
-  middlewares: [
-    requestId(),
-    helmet(frameOptions: 'DENY'),
-    ipFilter(allow: ['127.0.0.1', '10.0.0.0/8']),
-  ],
-  routes: [...],
-);
+Future<Response> tenant(Request req, Next next) async {
+  final id = req.headers['x-tenant-id'];
+  if (id == null) return Response.badRequest('Missing tenant');
+
+  req.setContext('tenant', id);
+  final response = await next();
+
+  // Runs after the handler. Use copyWith so cookies and streams are kept.
+  return response.copyWith(
+    headers: {...response.headers, 'x-tenant-id': id},
+  );
+}
 ```
 
-#### Authentication: `bearerAuth()`
+### Authentication
 
 ```dart
 final auth = bearerAuth(
-  validate: (token) async {
-    return await myAuthService.verify(token); // returns null on failure
-  },
+  validate: (token) => myAuthService.verify(token), // Return null to reject
 );
 
 Route.get(
   path: '/me',
+  middlewares: [auth],
   handler: (req) async {
     final user = req.context['user'] as UserProfile;
     return Response.ok({'id': user.id, 'name': user.name});
   },
-  middlewares: [auth],
-);
+)
 ```
 
-#### Rate Limiting: `rateLimit()`
+Rejected requests get a `401` with a `WWW-Authenticate` header. On a `WebSocketRoute`, the check runs before the upgrade, and the user is available as `ctx.request.context['user']`.
+
+### Rate limiting
 
 ```dart
-// 100 requests per minute globally:
+// 100 requests per minute, per client IP:
 rateLimit(maxRequests: 100, window: Duration(minutes: 1))
 
-// Sensitive endpoint: 5 attempts per 15 minutes:
+// Stricter on a sensitive route:
 Route.post(
   path: '/auth/login',
-  handler: loginHandler,
+  handler: login,
   middlewares: [rateLimit(maxRequests: 5, window: Duration(minutes: 15))],
 )
 ```
 
-#### File Uploads: `multipartParser()`
+Responses carry `X-RateLimit-*` headers, and a rejected request gets a `429` with `Retry-After`.
+
+**Behind a proxy**, every request appears to come from the proxy's IP, so all your clients would share one limit. Tell `rateLimit()` how many proxies you run, and it reads the client IP from the entries they appended to `X-Forwarded-For`:
+
+```dart
+rateLimit(maxRequests: 100, window: Duration(minutes: 1), trustedProxyHops: 1)
+```
+
+Leave it unset if you are not behind a proxy, or clients can pick their own IP by sending that header. `ipFilter()` has the same option, and it denies a request if the forwarded IP is missing or is not a plain address, rather than judging it by the proxy's IP.
+
+### File uploads
 
 ```dart
 Route.post(
   path: '/upload',
+  middlewares: [multipartParser(maxFileSize: 5 * 1024 * 1024)],
   handler: (req) async {
     final files = req.context['files'] as List<UploadedFile>;
     final fields = req.context['fields'] as Map<String, String>;
 
     for (final file in files) {
-      print('Received: ${file.filename} (${file.size} bytes)');
-      // Never use file.filename as a path - it is controlled by the client.
+      // file.filename comes from the client. Never use it as a path.
       final savedName = '${DateTime.now().microsecondsSinceEpoch}.bin';
       await File('uploads/$savedName').writeAsBytes(file.bytes);
     }
 
-    return Response.ok({'uploaded': files.length});
+    return Response.ok({'uploaded': files.length, 'fields': fields.length});
   },
-  middlewares: [multipartParser(maxFileSize: 5 * 1024 * 1024)],
 )
 ```
 
+Uploads are held in memory until the handler finishes, so set limits that suit your server.
+
 ---
 
-## Request Validation
-
-Create composable schemas and enforce them with `validate()`:
+## Request validation
 
 ```dart
 final userSchema = BodySchema({
@@ -330,46 +329,60 @@ final userSchema = BodySchema({
   'email':    Field.string().email().required(),
   'age':      Field.int_().min(18).max(120).required(),
   'role':     Field.string().oneOf(['admin', 'member']).required(),
-  'tags':     Field.list().minItems(1),
-  'verified': Field.bool_(),
+  'address':  Field.object({
+    'city': Field.string().required(),
+    'zip':  Field.int_(),
+  }),
+  'scores':   Field.list().maxItems(10).of(Field.int_().max(100)),
 });
 
 Route.post(
   path: '/register',
-  handler: registerUser,
-  middlewares: [validate(userSchema)],
+  handler: register,
+  middlewares: [validate(userSchema)], // Needs a body parser to run first
 )
-// Invalid requests automatically return 422 with a structured error map:
-// {"errors":{"email":"email must be a valid email address","age":"age must be ≥ 18"}}
 ```
+
+Invalid requests get a `422` listing every problem, with nested fields named by their path:
+
+```json
+{"errors": {"email": "email must be a valid email address", "address.city": "address.city is required", "scores[2]": "scores[2] must be ≤ 100"}}
+```
+
+On success, `req.context['validated']` holds only the declared fields, converted to their types. `req.body` stays exactly as it was received.
+
+```dart
+final user = req.context['validated'] as Map<String, dynamic>;
+final age = user['age'] as int; // "42" in the request becomes 42
+```
+
+Schemas on a route's own `middlewares` also appear as its request body in the generated docs.
 
 ---
 
-## Static Files
+## Static files and streaming
 
-Serve static directories safely with path traversal protection, MIME detection, ETag caching, and `index.html` fallback:
+### Static files
 
 ```dart
 Route.get(path: '/public/*', handler: staticFiles('./public'))
 ```
 
----
+Files are streamed from disk. You get path traversal protection, MIME types, `ETag` and `Last-Modified` with `304` responses, and `index.html` for directories.
 
-## Streaming Responses
+### Streaming responses
 
-Use `StreamResponse` to stream large files or dynamic chunked data directly without buffering in memory:
+`StreamResponse` sends data as it becomes available, without holding it all in memory. It is also how you send binary data.
 
 ```dart
 Route.get(
-  path: '/download/:file',
+  path: '/reports/monthly',
   handler: (req) async {
-    final file = File('storage/${req.params['file']}');
-    if (!await file.exists()) return Response.notFound('File not found');
-
+    final file = File('reports/monthly.csv');
     return StreamResponse(
       stream: file.openRead(),
       headers: {
-        'content-type': 'application/octet-stream',
+        'content-type': 'text/csv',
         'content-length': '${await file.length()}',
       },
     );
@@ -377,13 +390,17 @@ Route.get(
 )
 ```
 
+> **Never build a file path from `req.params`.** Params are URL-decoded, so `/download/..%2Fsecret.txt` gives you `../secret.txt`. To serve files chosen by the client, use `staticFiles()`, which checks for this.
+
+If a stream fails partway, the connection is dropped so the client can tell the response is incomplete.
+
 ---
 
-## Real-Time
+## Real-time
 
-### Server-Sent Events (SSE)
+### Server-Sent Events
 
-Push-based event stream compatible with the browser's `EventSource` API:
+Works with the browser's `EventSource`:
 
 ```dart
 Route.get(
@@ -392,10 +409,10 @@ Route.get(
     final sse = await SseContext.from(req);
 
     final timer = Timer.periodic(Duration(seconds: 1), (_) {
-      sse.send(data: 'ping', event: 'heartbeat');
+      sse.send(data: 'tick', event: 'heartbeat');
     });
 
-    await sse.done; // Wait for client disconnection
+    await sse.done; // Until the client leaves or the server shuts down
     timer.cancel();
     return sse.response;
   },
@@ -404,59 +421,114 @@ Route.get(
 
 ### WebSockets
 
-Declare WebSocket endpoints with lifecycle hooks and automatic ping/pong heartbeats:
-
 ```dart
 WebSocketRoute(
-  path: '/ws/chat/:roomId',
-  heartbeat: Duration(seconds: 30), // auto ping/pong
-  onStart: (ctx) async {
-    ctx.sendJson({'event': 'connected'});
-  },
-  onMessage: (ctx, data) async {
-    ctx.send(data);
-  },
-  onClose: (ctx, code, reason) async {
-    print('Closed: $code');
-  },
+  path: '/ws/echo/:roomId',
+  heartbeat: Duration(seconds: 30), // Closes connections that stop responding
+  onStart: (ctx) async => ctx.sendJson({'room': ctx.request.params['roomId']}),
+  onMessage: (ctx, data) async => ctx.send(data),
+  onClose: (ctx, code, reason) async => print('Closed: $code'),
+  onError: (ctx, error) async => print('Failed: $error'),
 )
 ```
 
-### WebSocketGroup — Rooms & Broadcasting
+Pass these to `QuadrantServer(webSocketRoutes: [...])`. Only `onMessage` is required. Middleware runs before the upgrade, so it can reject a connection with a normal HTTP response.
 
-`WebSocketGroup` manages a set of connections for broadcasting:
+### Rooms and broadcasting
 
 ```dart
 final rooms = <String, WebSocketGroup>{};
-WebSocketGroup _room(String id) => rooms.putIfAbsent(id, () => WebSocketGroup());
+WebSocketGroup room(String id) =>
+    rooms.putIfAbsent(id, () => WebSocketGroup(name: 'room:$id'));
 
 WebSocketRoute(
   path: '/ws/chat/:roomId',
   onStart: (ctx) async {
-    final room = _room(ctx.request.params['roomId']!);
-    room.add(ctx);
-    room.broadcastJson({'event': 'joined'}, exclude: ctx);
+    final group = room(ctx.request.params['roomId']!);
+    group.add(ctx);
+    group.broadcastJson({'event': 'joined'}, exclude: ctx);
   },
   onMessage: (ctx, data) async {
-    _room(ctx.request.params['roomId']!).broadcast(data, exclude: ctx);
+    room(ctx.request.params['roomId']!).broadcast(data, exclude: ctx);
   },
   onClose: (ctx, code, reason) async {
     final id = ctx.request.params['roomId']!;
-    _room(id).remove(ctx);
-    if (_room(id).isEmpty) rooms.remove(id);
+    if (room(id).isEmpty) rooms.remove(id);
   },
 )
 ```
 
+Connections leave their group automatically when they close. The `name` is only needed in a [cluster](#using-every-cpu-core), where it links groups across isolates.
+
 ---
 
-## HTTPS / TLS & Operations
+## Using every CPU core
 
-### HTTPS / TLS
+A Dart isolate runs your handlers on one thread. `QuadrantCluster` runs one server per isolate on the same port:
 
 ```dart
-final app = QuadrantServer(routes: [...]);
+import 'dart:io';
 
+import 'package:quadrant_server/quadrant_server.dart';
+
+Future<Response> getUsers(Request req) async => Response.ok([]);
+
+void main() async {
+  final cluster = await QuadrantCluster.start(
+    isolates: Platform.numberOfProcessors,
+    port: 3000,
+    build: () => QuadrantServer(
+      middlewares: [
+        logger(),
+        rateLimit(maxRequests: 100, window: Duration(minutes: 1)),
+      ],
+      routes: [Route.get(path: '/users', handler: getUsers)],
+    ),
+  );
+
+  print('Listening on port ${cluster.port}');
+  // Later: await cluster.close();
+}
+```
+
+`build` runs once inside each isolate. Open database connections and similar resources inside it, because they cannot be sent between isolates. For HTTPS, pass `certificateChain` and `privateKey` to `start()`.
+
+### What is shared between isolates
+
+Isolates do not share memory, so a variable in your code exists once per isolate.
+
+| | Across isolates |
+|---|---|
+| `rateLimit()` | One count. Each limited request makes one round trip to the main isolate. `build` must create limiters in the same order every time. |
+| `WebSocketGroup(name: 'room:42')` | `broadcast()`, `broadcastJson()` and `closeAll()` reach every isolate. `length`, `isEmpty` and `members` cover the current one only. |
+| `WebSocketGroup()` | Throws when you add a member, because it would silently miss clients. Use `WebSocketGroup.local()` if you mean to stay on one isolate. |
+| Health check | Reports the total requests of all isolates, plus an `isolates` count. |
+| **Your own variables** | **Not shared.** Keep caches, sessions and similar state in a database or external store. |
+
+An isolate that dies is reported but not restarted. Nothing is shared with other processes or machines, so if you run several, rate limits apply to each one separately.
+
+### Performance
+
+Measured with [`benchmark/`](benchmark) on an i7-13620H laptop, using a compiled build over loopback, with no TLS, 64 keep-alive connections, and the server pinned to 4 physical cores (8 hardware threads):
+
+| Workload | 1 isolate | 8 isolates |
+|---|--:|--:|
+| Plain route | 66,692 req/s | 175,750 req/s (2.6x) |
+| 1 ms of CPU work per request | 991 req/s | 7,478 req/s (7.5x) |
+| `requestId`, `helmet`, `cors`, `logger`, `bodyParser` | 44,563 req/s | 120,550 req/s (2.7x) |
+| Rate limited, count shared across isolates | 54,535 req/s | 138,860 req/s (2.5x) |
+
+The more work your handlers do, the more isolates help. If they mostly wait on a database, one isolate may be enough: it handled 256 connections with a simulated 10 ms query at 39% of one core. These numbers are a guide, so measure your own app on your own hardware.
+
+For the best performance, deploy a compiled build (`dart compile exe`) rather than using `dart run`.
+
+---
+
+## Running in production
+
+### HTTPS
+
+```dart
 await app.listenSecure(
   port: 443,
   certificateChain: File('cert.pem'),
@@ -464,41 +536,85 @@ await app.listenSecure(
 );
 ```
 
-### Health Check
-
-Enable `/health` for Kubernetes / load balancers:
+### Health check
 
 ```dart
-final app = QuadrantServer(
-  healthCheck: true,
-  routes: [...],
-);
-// GET /health returns:
+QuadrantServer(healthCheck: true, routes: [...]);
+
+// GET /health
 // {"status":"ok","uptime":3600,"requests":1024,"memoryMb":38.4}
 ```
 
-### Graceful Shutdown
+It is answered before any middleware, so it skips auth, rate limiting and logging. Anyone who can reach it can read these numbers. Change the path with `healthCheckPath`.
+
+### API docs
+
+`docs: true` serves Swagger UI at `/quadrant_docs`, generated from your routes. By default it only answers requests from the same machine; `docsLocalOnly: false` opens it up. The page loads Swagger UI from a CDN, so the browser viewing it needs internet access.
+
+### Graceful shutdown
 
 ```dart
-final server = await app.listen(port: 3000);
-
-// Stops accepting new requests and drains all in-flight requests cleanly:
-await app.close();
+ProcessSignal.sigterm.watch().listen((_) async {
+  await app.close(timeout: Duration(seconds: 30));
+  exit(0);
+});
 ```
 
-### Error Handling
+`close()` stops accepting connections, ends open WebSockets (with code `1001`) and SSE streams, and waits for in-flight requests and streaming responses. `timeout` limits that wait, so a stalled client cannot hold up shutdown; without it, the wait has no limit. `close(force: true)` drops everything straight away.
+
+### Error handling
 
 ```dart
-final app = QuadrantServer(
+QuadrantServer(
   routes: [...],
   onError: (error, req) {
-    print('Internal error on ${req.path}: $error');
+    print('Failed on ${req.path}: $error');
     return Response.internalServerError('Something went wrong');
   },
 );
 ```
 
+Without `onError`, an exception in a handler gives a `500` with a generic message, so internal details do not reach clients. WebSocket callback errors go to that route's `onError`.
+
+### Checklist
+
+- `listen()` binds to all network interfaces. To accept local connections only, such as behind a proxy on the same machine, pass `address: InternetAddress.loopbackIPv4`.
+- Replace the `cors()` default of `origin: '*'` with your real origin.
+- Set `trustedProxyHops` on `rateLimit()` and `ipFilter()` if you run behind a proxy.
+- Check that `bodyParser()` and `multipartParser()` limits suit your app.
+
 ---
+
+## Known limitations
+
+- **A cluster isolate that dies is not restarted.** It is reported, and the others keep serving.
+- **`rateLimit()` keeps its counts in memory.** They reset on restart and are not shared between processes or machines.
+- **Uploads and JSON bodies are held in memory** until the request finishes.
+
+---
+
+## Development
+
+```bash
+dart pub get
+dart test
+dart analyze
+```
+
+### Benchmarks
+
+Linux only. Requires `g++` and `taskset`.
+
+```bash
+dart run benchmark/run.dart --label=my-run           # About 15 minutes
+dart run benchmark/report.dart --after=my-run        # Writes benchmark/results/report.html
+```
+
+The results compare the framework with plain `dart:io`, raw Dart sockets and a bare C++ server. The report opens in any browser and needs no network access.
+
+### Releasing
+
+Update the version in both `pubspec.yaml` and `lib/src/core/version.dart`; a test fails if they differ. The README has no version number to update.
 
 ## License
 

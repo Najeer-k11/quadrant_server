@@ -2,9 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import '../middleware.dart';
-import '../request.dart';
-import '../response.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
 
 /// Body parser middleware. Reads the request body stream, JSON-decodes it,
 /// and makes the parsed body available to downstream middlewares and handlers

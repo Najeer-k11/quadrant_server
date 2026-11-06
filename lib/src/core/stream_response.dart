@@ -10,24 +10,24 @@ import 'response.dart';
 /// all into memory first.
 ///
 /// The framework detects [StreamResponse] in `_writeResponse` and uses
-/// `HttpResponse.addStream()` to pipe the stream, then closes the connection.
+/// `HttpResponse.addStream()` to pipe the stream, then ends the response.
+/// `QuadrantServer.close()` waits for the stream to finish.
 ///
 /// ```dart
-/// // Stream a file download:
+/// // Stream a file download. Never build the path from `req.params`: params
+/// // are URL-decoded, so `..%2Fsecret` would escape the directory. To serve
+/// // files chosen by the client, use `staticFiles()`.
 /// Route.get(
-///   path: '/download/:name',
+///   path: '/reports/monthly',
 ///   handler: (req) async {
-///     final file = File('data/${req.params['name']}');
-///     if (!await file.exists()) return Response.notFound('File not found');
-///
+///     final file = File('reports/monthly.csv');
 ///     final stat = await file.stat();
 ///     return StreamResponse(
 ///       stream: file.openRead(),
 ///       headers: {
-///         'content-type': 'application/octet-stream',
+///         'content-type': 'text/csv',
 ///         'content-length': '${stat.size}',
-///         'content-disposition':
-///             'attachment; filename="${req.params['name']}"',
+///         'content-disposition': 'attachment; filename="monthly.csv"',
 ///       },
 ///     );
 ///   },

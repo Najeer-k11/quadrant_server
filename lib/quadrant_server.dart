@@ -4,27 +4,28 @@
 library quadrant_server;
 
 // ─── Core ─────────────────────────────────────────────────────
-export 'src/quadrant_app.dart';
-export 'src/quadrant_router.dart';
-export 'src/middleware.dart';
-export 'src/request.dart';
-export 'src/response.dart';
-export 'src/route.dart';
-export 'src/stream_response.dart';
-export 'src/validator.dart';
+export 'src/cluster/cluster.dart';
+export 'src/core/quadrant_app.dart';
+export 'src/routing/quadrant_router.dart';
+export 'src/core/middleware.dart';
+export 'src/core/request.dart' hide consumeSetContext;
+export 'src/core/response.dart';
+export 'src/routing/route.dart';
+export 'src/core/stream_response.dart';
+export 'src/validation/validator.dart' hide schemaOf;
 
 // ─── Real-time ────────────────────────────────────────────────
-export 'src/sse_context.dart';
-export 'src/websocket_context.dart';
-export 'src/websocket_group.dart';
-export 'src/websocket_route.dart';
+export 'src/realtime/sse_context.dart' hide registerSseTracker;
+export 'src/realtime/websocket_context.dart';
+export 'src/realtime/websocket_group.dart';
+export 'src/realtime/websocket_route.dart';
 
 // ─── Middlewares ──────────────────────────────────────────────
 export 'src/middlewares/bearer_auth.dart' hide consumeContextOverride;
 export 'src/middlewares/body_parser.dart';
 export 'src/middlewares/compress.dart';
 export 'src/middlewares/cookie_parser.dart' hide consumeCookieContext;
-export 'src/middlewares/cors.dart';
+export 'src/middlewares/cors.dart' hide isCorsMiddleware;
 export 'src/middlewares/etag.dart';
 export 'src/middlewares/form_parser.dart';
 export 'src/middlewares/helmet.dart';

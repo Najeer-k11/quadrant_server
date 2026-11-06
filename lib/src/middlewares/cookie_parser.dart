@@ -1,5 +1,5 @@
-import '../middleware.dart';
-import '../request.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
 
 /// Cookie parser middleware.
 ///

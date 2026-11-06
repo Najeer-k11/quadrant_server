@@ -1,6 +1,6 @@
-import '../middleware.dart';
-import '../request.dart';
-import '../response.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
 
 /// CORS middleware. Adds CORS headers to every response.
 ///
@@ -12,6 +12,11 @@ import '../response.dart';
 ///
 /// When [origin] is not `'*'`, a `Vary: Origin` header is automatically
 /// added so CDNs and proxies cache responses correctly per origin.
+///
+/// Works globally, on a route, or on a `QuadrantRouter`. `OPTIONS` requests are
+/// answered with `204`, even if the path has no `OPTIONS` route. For a preflight
+/// on a route, only `cors()` runs: browsers send no credentials with a
+/// preflight, so the route's other middleware, such as auth, is skipped.
 Middleware cors({
   String origin = '*',
   String methods = 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
@@ -32,7 +37,7 @@ Middleware cors({
     if (maxAge > 0) 'access-control-max-age': '$maxAge',
   };
 
-  return (Request req, Next next) async {
+  Future<Response> middleware(Request req, Next next) async {
     // Handle preflight OPTIONS requests.
     if (req.method == 'OPTIONS') {
       return Response(
@@ -48,5 +53,16 @@ Middleware cors({
       ..addAll(corsHeaders);
 
     return response.copyWith(headers: mergedHeaders);
-  };
+  }
+
+  _corsMiddlewares[middleware] = true;
+  return middleware;
 }
+
+final _corsMiddlewares = Expando<bool>('quadrant_cors');
+
+/// Whether [middleware] was created by [cors].
+///
+/// This is an **internal** API — not part of the public surface.
+bool isCorsMiddleware(Middleware middleware) =>
+    _corsMiddlewares[middleware] ?? false;

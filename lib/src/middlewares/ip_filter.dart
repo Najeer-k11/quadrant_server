@@ -1,8 +1,9 @@
 import 'dart:io';
 
-import '../middleware.dart';
-import '../request.dart';
-import '../response.dart';
+import '../utils/client_ip.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
 
 /// IP allow/deny filter middleware.
 ///
@@ -28,47 +29,63 @@ import '../response.dart';
 /// [allow] — if set, only IPs matching an entry are allowed; all others → 403.
 /// [deny] — if set, IPs matching an entry are blocked → 403; all others pass.
 /// [onDeny] — optional factory for the rejection response.
+/// [trustedProxyHops] — the number of proxies in front of this server. Behind
+/// a proxy, the connection comes from the proxy's IP, so a filter would judge
+/// every client by it. With this set, the client IP is read from
+/// `X-Forwarded-For`, counting that many entries from the right: entries your
+/// own proxies appended, which a client cannot forge. If that entry is missing
+/// or is not a plain IP address (some proxies add a port), the request is denied
+/// rather than judged by the proxy's IP. A request with no such header is judged
+/// by its connection. Leave it at `0` (the default) when not behind a proxy, or
+/// clients can pick their own IP.
 Middleware ipFilter({
   List<String> allow = const [],
   List<String> deny = const [],
   Response Function(Request req)? onDeny,
+  int trustedProxyHops = 0,
 }) {
   assert(allow.isEmpty || deny.isEmpty,
       'ipFilter: provide either [allow] or [deny], not both.');
+  if (trustedProxyHops < 0) {
+    throw ArgumentError.value(
+        trustedProxyHops, 'trustedProxyHops', 'Must not be negative.');
+  }
 
   final allowRules = allow.map(_CidrRule.parse).toList();
   final denyRules = deny.map(_CidrRule.parse).toList();
 
-  return (Request req, Next next) async {
-    final remote = req.raw.connectionInfo?.remoteAddress;
-    if (remote == null) return next(); // no IP info — pass through
+  Response rejected(Request req, String? ip) =>
+      onDeny?.call(req) ??
+      Response(
+        statusCode: 403,
+        headers: {'content-type': 'application/json'},
+        body: ip == null
+            ? '{"error":"Forbidden"}'
+            : '{"error":"Forbidden","ip":"$ip"}',
+      );
 
-    final ip = remote;
+  return (Request req, Next next) async {
+    final InternetAddress ip;
+    final forwarded = req.headers['x-forwarded-for'];
+    if (trustedProxyHops > 0 && forwarded != null) {
+      final client = forwardedClientIp(forwarded, trustedProxyHops);
+      final parsed = client == null ? null : InternetAddress.tryParse(client);
+      if (parsed == null) return rejected(req, null);
+      ip = parsed;
+    } else {
+      final remote = req.raw.connectionInfo?.remoteAddress;
+      if (remote == null) return next(); // no IP info — pass through
+      ip = remote;
+    }
 
     // Allow-list mode: reject if IP does not match any rule.
-    if (allowRules.isNotEmpty) {
-      final allowed = allowRules.any((r) => r.matches(ip));
-      if (!allowed) {
-        return onDeny?.call(req) ??
-            Response(
-              statusCode: 403,
-              headers: {'content-type': 'application/json'},
-              body: '{"error":"Forbidden","ip":"${ip.address}"}',
-            );
-      }
+    if (allowRules.isNotEmpty && !allowRules.any((r) => r.matches(ip))) {
+      return rejected(req, ip.address);
     }
 
     // Deny-list mode: reject if IP matches any rule.
-    if (denyRules.isNotEmpty) {
-      final blocked = denyRules.any((r) => r.matches(ip));
-      if (blocked) {
-        return onDeny?.call(req) ??
-            Response(
-              statusCode: 403,
-              headers: {'content-type': 'application/json'},
-              body: '{"error":"Forbidden","ip":"${ip.address}"}',
-            );
-      }
+    if (denyRules.isNotEmpty && denyRules.any((r) => r.matches(ip))) {
+      return rejected(req, ip.address);
     }
 
     return next();

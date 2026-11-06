@@ -1,8 +1,8 @@
 import 'dart:convert';
 
-import '../middleware.dart';
-import '../request.dart';
-import '../response.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
 
 /// ETag middleware.
 ///

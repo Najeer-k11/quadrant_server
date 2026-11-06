@@ -1,3 +1,52 @@
+## Unreleased
+
+### Security
+
+- **The streaming example in the README and in the `StreamResponse` docs allowed path traversal** — It built a file path from `req.params`, and params are URL-decoded, so `/download/..%2Fsecret.txt` could read files outside the intended directory. The examples are fixed. **If you copied that example, check your code**: use `staticFiles()` for files chosen by the client.
+
+### Added
+
+- **`QuadrantCluster`** — Runs one server per isolate on the same port. In the included benchmark, a typical middleware stack went from about 45,000 to 121,000 requests per second on 8 isolates, and handlers with 1 ms of CPU work scaled 7.5x. See the README for what is and is not shared between isolates.
+- **`WebSocketGroup(name:)` and `WebSocketGroup.local()`** — Named groups broadcast across the isolates of a cluster. Outside a cluster nothing changes, and existing `WebSocketGroup()` calls still work.
+- **`Field.object()` and `ListField.of()`** — Nested validation, with errors keyed by path such as `address.city` and `scores[2]`.
+- **`req.context['validated']`** — After `validate()`, holds the declared fields coerced to their types. `req.body` is unchanged.
+- **Schemas in the API docs** — A `validate()` on a route's own `middlewares` now appears as its request body at `/quadrant_docs`.
+- **`rateLimit(trustedProxyHops:)` and `ipFilter(trustedProxyHops:)`** — Read the client IP from the `X-Forwarded-For` entries your own proxies appended, so behind a proxy clients no longer share one limit or get judged by the proxy's IP. `ipFilter()` denies a request if that IP is missing or is not a plain address.
+- **CI** — A workflow runs the analyzer and tests on pushes to `main` and on pull requests.
+- `listen(shared:)`, `listenSecure(shared:)` and `QuadrantServer.requestCount`.
+- `benchmark/` — A repeatable load test comparing the framework with plain `dart:io`, raw sockets and a bare C++ server, with an HTML report.
+
+### Changed
+
+- **Global middleware now runs for requests that match no route** — `404`, `405` and malformed-path responses now get headers from `helmet()` and `cors()`, and `logger()` records them. Check this if you rely on the old behaviour: a global `bearerAuth()` now answers `401` instead of `404` for unknown paths, a global `rateLimit()` counts those requests, and a global `ipFilter()` blocks them.
+
+### Fixed
+
+- **`cors()` preflight did not work** — A real `OPTIONS` request got a `405` before any middleware ran, so browsers blocked cross-origin requests that need a preflight, such as JSON `POST`s. It now gets a `204`, with `cors()` used globally, on a route, or on a `QuadrantRouter`. Route auth does not run on these requests, because browsers send no credentials with a preflight.
+- **Non-ASCII responses were corrupted or empty** — `Response.ok()`, `validate()` and any response without a charset in its `content-type` were encoded as Latin-1. A name like `Zoë` arrived as invalid UTF-8, and text outside Latin-1, such as `日本語` or the `≥` in `validate()`'s own error messages, produced an empty body with no error. These responses are now UTF-8, and an explicit charset is still respected.
+- **A stream that fails to start hung the request** — A `StreamResponse` whose stream was already in use left the request, and so `close()`, waiting forever. The connection is now dropped.
+- **Malformed path params answered `500`** — A request such as `/users/%FF` now gets `400`, without calling `onError`.
+- **`rateLimit()` slowed down with large limits** — It scanned every stored timestamp on each request. It now only touches the expired ones.
+- **`close()` hung on open WebSockets and SSE streams** — They counted as in-flight requests but nothing ended them, so `close()` waited until the clients left. It now closes WebSockets with code `1001` and ends SSE streams first.
+- **`close()` did not wait for `StreamResponse`** — It could return while a stream was still sending, and exiting then cut the response short. Requests now count as in flight until the response is written.
+- **`staticFiles()` lost middleware headers** — It wrote straight to the socket, so headers from `helmet()`, `cors()` and `requestId()` were never sent. It now returns a `StreamResponse`. `HEAD` requests no longer read the file.
+- **WebSocket callbacks lost middleware context** — `ctx.request.context` was always empty, so a WebSocket route could not see the `bearerAuth()` user or the `requestId()` value. It now holds everything the middlewares added.
+- **Calling `close()` twice** while draining could leave the first call waiting forever.
+
+### Performance
+
+Measured with `benchmark/run.dart` on one isolate.
+
+- **Router** — Route patterns are split once at startup and the request path once per request. An app with 100 routes went from about 28,000 to 62,000 requests per second when matching its last route. Matching rules did not change: the first registered route still wins.
+- **`requestId()`** — About 12% more requests per second, by making fewer calls to the secure random generator. IDs are still UUID v4 from the same generator.
+- **Simple routes are slightly slower** — Plain, JSON and small POST routes lost 2–4%. The likely cause is that each request now stays in flight until its response is written, which graceful shutdown needs, though the cost was not isolated.
+
+### Added
+
+- `Request.setContext()` — Lets your own middleware pass values downstream. Before, only the built-in middlewares could: `Next` takes no arguments, and the old doc comment showing `next(req.copyWith(...))` did not compile.
+- `close(timeout:)` — stops waiting after a deadline and destroys the remaining connections.
+- `QuadrantRouter.ws(heartbeat:)` — was only available on `WebSocketRoute`.
+
 ## 2.5.2
 
 ### Fixed

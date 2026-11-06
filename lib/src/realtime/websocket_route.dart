@@ -1,4 +1,4 @@
-import 'middleware.dart';
+import '../core/middleware.dart';
 import 'websocket_context.dart';
 
 /// Called once immediately after the WebSocket upgrade succeeds.
