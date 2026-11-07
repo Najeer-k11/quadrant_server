@@ -151,7 +151,8 @@ class StringField extends Field {
     if (raw == null || (raw is String && raw.isEmpty)) {
       return _isRequired ? '$fieldName is required' : null;
     }
-    final s = raw.toString();
+    if (raw is! String) return '$fieldName must be a string';
+    final s = raw;
     if (_minLength != null && s.length < _minLength!) {
       return '$fieldName must be at least $_minLength characters';
     }
