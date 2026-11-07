@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'request.dart';
+import '../core/request.dart';
 
 /// Per-connection WebSocket context passed to every callback.
 ///

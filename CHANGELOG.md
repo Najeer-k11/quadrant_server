@@ -1,3 +1,71 @@
+## 2.6.0
+
+### Before you upgrade
+
+Nothing needs changing for most apps, but these can change what a client sees:
+
+- `multipartParser()` now has limits it did not have before. An upload that does not fit in `maxBufferedBytes` (256 MB) gets a `503`, and a request over `maxParts` (1,000) or `maxFieldBytes` (10 MB) gets a `413`. Set any of them to `0` to turn it off.
+- `multipartParser()` answers `400` for a body without its closing delimiter, which it used to accept.
+- Global middleware now runs for requests that match no route. See **Changed** below.
+
+### Security
+
+- **`rateLimit()` could be bypassed over IPv6** — Each address had its own count, and a single client usually controls a whole /64. IPv6 clients are now grouped by /64, and IPv4-mapped addresses count as the IPv4 address they carry. This only affects the default key, not a `keyExtractor`.
+- **`rateLimit()` could use unlimited memory** — A flood of distinct keys all stayed in memory until the window passed. See `maxKeys` below.
+- **The streaming example in the README and in the `StreamResponse` docs allowed path traversal** — It built a file path from `req.params`, and params are URL-decoded, so `/download/..%2Fsecret.txt` could read files outside the intended directory. The examples are fixed. **If you copied that example, check your code**: use `staticFiles()` for files chosen by the client.
+
+### Added
+
+- **`multipartParser(diskThreshold:, tempDirectory:)`** — Files above the threshold go to a temporary file, deleted once the response is ready. Adds `UploadedFile.moveTo()`, `openRead()`, `readAsBytes()`, `isInMemory` and `path`. By default files stay in memory and `bytes` works as before; with `diskThreshold`, it throws for a file on disk.
+- **`multipartParser(maxBufferedBytes:, maxParts:, maxFieldBytes:)`** — Limits on the upload data one isolate holds in memory (256 MB), the parts in a request (1,000) and the text fields in a request (10 MB). **Check these if you accept very large uploads in memory or forms with many parts**: they answer `503` and `413`, and `0` turns them off.
+- **`rateLimit(maxKeys:)`** — The most clients tracked at once. Defaults to 100,000.
+- **`QuadrantCluster`** — Runs one server per isolate on the same port. In the included benchmark, a typical middleware stack went from about 45,000 to 121,000 requests per second on 8 isolates, and handlers with 1 ms of CPU work scaled 7.5x. See the README for what is and is not shared between isolates.
+- **Restarting isolates** — A `QuadrantCluster` isolate that dies is replaced, with a growing delay, giving up after `maxRestarts` failures in a row. Adds `maxRestarts`, `restartDelay`, `onIsolateExit` and `runningIsolates`.
+- **`WebSocketGroup(name:)` and `WebSocketGroup.local()`** — Named groups broadcast across the isolates of a cluster. Outside a cluster nothing changes, and existing `WebSocketGroup()` calls still work.
+- **`Field.object()` and `ListField.of()`** — Nested validation, with errors keyed by path such as `address.city` and `scores[2]`.
+- **`req.context['validated']`** — After `validate()`, holds the declared fields coerced to their types. `req.body` is unchanged.
+- **Schemas in the API docs** — A `validate()` on a route's own `middlewares` now appears as its request body at `/quadrant_docs`.
+- **`rateLimit(trustedProxyHops:)` and `ipFilter(trustedProxyHops:)`** — Read the client IP from the `X-Forwarded-For` entries your own proxies appended, so behind a proxy clients no longer share one limit or get judged by the proxy's IP. `ipFilter()` denies a request if that IP is missing or is not a plain address.
+- **CI** — A workflow runs the analyzer and tests on pushes to `main` and on pull requests.
+- `listen(shared:)`, `listenSecure(shared:)` and `QuadrantServer.requestCount`.
+- `benchmark/` — A repeatable load test comparing the framework with plain `dart:io`, raw sockets and a bare C++ server, with an HTML report.
+
+### Changed
+
+- **`multipartParser()` parses uploads as they arrive** — A file over `maxFileSize` is rejected as soon as it passes the limit, not after the whole body has been read. A line that starts with the delimiter but continues with something else now gets a `400`; the multipart format does not allow one inside a part. A disk error is a server error, not a `400`.
+- **Global middleware now runs for requests that match no route** — `404`, `405` and malformed-path responses now get headers from `helmet()` and `cors()`, and `logger()` records them. Check this if you rely on the old behaviour: a global `bearerAuth()` now answers `401` instead of `404` for unknown paths, a global `rateLimit()` counts those requests, and a global `ipFilter()` blocks them.
+
+### Fixed
+
+- **`multipartParser()` turned handler errors into `400`s** — An exception from anything after it, including the handler, returned `400 Invalid multipart body` and skipped `onError`. It now reaches the usual error handling.
+- **A `413` from `bodyParser()`, `formParser()` and `multipartParser()` could be lost** — If the body was still arriving when it passed the limit, the connection closed with no response. If the declared size was over the limit, the whole body was read first. The response now goes out straight away, and the connection then closes. `bodyParser()` and `formParser()` also reject a declared size over the limit now.
+- **`multipartParser()` could take a file's `name` from its `filename`** — When `filename` came first in the header, as in `filename="a.txt"; name="f"`, `fieldName` was `a.txt`.
+- **`multipartParser()` accepted truncated uploads** — A body without its closing delimiter reached the handler as if complete, with a cut-off last file. It now gets a `400`. **Check this if a client of yours omits the closing delimiter.**
+- **`cors()` preflight did not work** — A real `OPTIONS` request got a `405` before any middleware ran, so browsers blocked cross-origin requests that need a preflight, such as JSON `POST`s. It now gets a `204`, with `cors()` used globally, on a route, or on a `QuadrantRouter`. Route auth does not run on these requests, because browsers send no credentials with a preflight.
+- **Non-ASCII responses were corrupted or empty** — `Response.ok()`, `validate()` and any response without a charset in its `content-type` were encoded as Latin-1. A name like `Zoë` arrived as invalid UTF-8, and text outside Latin-1, such as `日本語` or the `≥` in `validate()`'s own error messages, produced an empty body with no error. These responses are now UTF-8, and an explicit charset is still respected.
+- **A stream that fails to start hung the request** — A `StreamResponse` whose stream was already in use left the request, and so `close()`, waiting forever. The connection is now dropped.
+- **Malformed path params answered `500`** — A request such as `/users/%FF` now gets `400`, without calling `onError`.
+- **`rateLimit()` slowed down with large limits** — It scanned every stored timestamp on each request. It now only touches the expired ones.
+- **`close()` hung on open WebSockets and SSE streams** — They counted as in-flight requests but nothing ended them, so `close()` waited until the clients left. It now closes WebSockets with code `1001` and ends SSE streams first.
+- **`close()` did not wait for `StreamResponse`** — It could return while a stream was still sending, and exiting then cut the response short. Requests now count as in flight until the response is written.
+- **`staticFiles()` lost middleware headers** — It wrote straight to the socket, so headers from `helmet()`, `cors()` and `requestId()` were never sent. It now returns a `StreamResponse`. `HEAD` requests no longer read the file.
+- **WebSocket callbacks lost middleware context** — `ctx.request.context` was always empty, so a WebSocket route could not see the `bearerAuth()` user or the `requestId()` value. It now holds everything the middlewares added.
+- **Calling `close()` twice** while draining could leave the first call waiting forever.
+
+### Performance
+
+Measured with `benchmark/run.dart` on one isolate.
+
+- **Router** — Route patterns are split once at startup and the request path once per request. An app with 100 routes went from about 28,000 to 62,000 requests per second when matching its last route. Matching rules did not change: the first registered route still wins.
+- **`requestId()`** — About 12% more requests per second, by making fewer calls to the secure random generator. IDs are still UUID v4 from the same generator.
+- **Simple routes are slightly slower** — Plain, JSON and small POST routes lost 2–4%. The likely cause is that each request now stays in flight until its response is written, which graceful shutdown needs, though the cost was not isolated.
+
+### Added
+
+- `Request.setContext()` — Lets your own middleware pass values downstream. Before, only the built-in middlewares could: `Next` takes no arguments, and the old doc comment showing `next(req.copyWith(...))` did not compile.
+- `close(timeout:)` — stops waiting after a deadline and destroys the remaining connections.
+- `QuadrantRouter.ws(heartbeat:)` — was only available on `WebSocketRoute`.
+
 ## 2.5.2
 
 ### Fixed

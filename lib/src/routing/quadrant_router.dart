@@ -1,6 +1,6 @@
-import 'middleware.dart';
+import '../core/middleware.dart';
 import 'route.dart';
-import 'websocket_route.dart';
+import '../realtime/websocket_route.dart';
 
 /// A route group that prefixes all its routes with a common path segment.
 ///
@@ -88,6 +88,7 @@ class QuadrantRouter {
     OnStartCallback? onStart,
     OnCloseCallback? onClose,
     OnErrorCallback? onError,
+    Duration? heartbeat,
     List<Middleware> middlewares = const [],
   }) {
     _wsRoutes.add(WebSocketRoute(
@@ -96,6 +97,7 @@ class QuadrantRouter {
       onStart: onStart,
       onClose: onClose,
       onError: onError,
+      heartbeat: heartbeat,
       middlewares: [...this.middlewares, ...middlewares],
     ));
     return this;

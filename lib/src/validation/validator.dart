@@ -1,8 +1,8 @@
 import 'dart:convert';
 
-import 'middleware.dart';
-import 'request.dart';
-import 'response.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
 
 // ─── Field definitions ────────────────────────────────────────
 
@@ -22,8 +22,17 @@ abstract class Field {
   /// Creates a boolean field validator.
   static BoolField bool_() => const BoolField._();
 
-  /// Creates a list field validator.
+  /// Creates a list field validator. Use [ListField.of] to check its items.
   static ListField list() => const ListField._();
+
+  /// Creates a nested object field validator.
+  ///
+  /// ```dart
+  /// 'address': Field.object({
+  ///   'city': Field.string().required(),
+  /// }).required(),
+  /// ```
+  static ObjectField object(Map<String, Field> fields) => ObjectField._(fields);
 
   /// Validates [raw] (the raw value from the body/params/query).
   /// Returns `null` on success, or an error message string on failure.
@@ -31,6 +40,19 @@ abstract class Field {
 
   /// Coerces [raw] into the field's expected type.
   dynamic coerce(dynamic raw) => raw;
+
+  /// Whether the field must be present.
+  bool get isRequired;
+
+  /// Adds every problem with [raw] to [errors], keyed by its path, such as
+  /// `address.city` or `tags[2]`.
+  void collectErrors(String name, dynamic raw, Map<String, String> errors) {
+    final error = validate(name, raw);
+    if (error != null) errors[name] = error;
+  }
+
+  /// Describes this field as a JSON Schema, for the generated API docs.
+  Map<String, dynamic> toJsonSchema();
 }
 
 /// String field with optional constraints.
@@ -112,6 +134,19 @@ class StringField extends Field {
       oneOf: options);
 
   @override
+  bool get isRequired => _isRequired;
+
+  @override
+  Map<String, dynamic> toJsonSchema() => {
+        'type': 'string',
+        if (_minLength != null) 'minLength': _minLength,
+        if (_maxLength != null) 'maxLength': _maxLength,
+        if (_pattern != null) 'pattern': _pattern!.pattern,
+        if (_isEmail) 'format': 'email',
+        if (_oneOf != null) 'enum': _oneOf,
+      };
+
+  @override
   String? validate(String fieldName, dynamic raw) {
     if (raw == null || (raw is String && raw.isEmpty)) {
       return _isRequired ? '$fieldName is required' : null;
@@ -153,6 +188,16 @@ class IntField extends Field {
   IntField max(int n) => IntField._(required: _isRequired, min: _min, max: n);
 
   @override
+  bool get isRequired => _isRequired;
+
+  @override
+  Map<String, dynamic> toJsonSchema() => {
+        'type': 'integer',
+        if (_min != null) 'minimum': _min,
+        if (_max != null) 'maximum': _max,
+      };
+
+  @override
   int? coerce(dynamic raw) {
     if (raw is int) return raw;
     if (raw is String) return int.tryParse(raw);
@@ -190,6 +235,16 @@ class DoubleField extends Field {
       DoubleField._(required: _isRequired, min: _min, max: n);
 
   @override
+  bool get isRequired => _isRequired;
+
+  @override
+  Map<String, dynamic> toJsonSchema() => {
+        'type': 'number',
+        if (_min != null) 'minimum': _min,
+        if (_max != null) 'maximum': _max,
+      };
+
+  @override
   double? coerce(dynamic raw) {
     if (raw is double) return raw;
     if (raw is int) return raw.toDouble();
@@ -219,6 +274,12 @@ class BoolField extends Field {
   BoolField required() => BoolField._(required: true);
 
   @override
+  bool get isRequired => _isRequired;
+
+  @override
+  Map<String, dynamic> toJsonSchema() => {'type': 'boolean'};
+
+  @override
   dynamic coerce(dynamic raw) {
     if (raw is bool) return raw;
     if (raw == 'true' || raw == '1' || raw == 'yes') return true;
@@ -239,20 +300,61 @@ class ListField extends Field {
   final bool _isRequired;
   final int? _minItems;
   final int? _maxItems;
+  final Field? _items;
 
-  const ListField._({bool required = false, int? minItems, int? maxItems})
+  const ListField._(
+      {bool required = false, int? minItems, int? maxItems, Field? items})
       : _isRequired = required,
         _minItems = minItems,
         _maxItems = maxItems,
+        _items = items,
         super._();
 
+  ListField required() => ListField._(
+      required: true, minItems: _minItems, maxItems: _maxItems, items: _items);
+  ListField minItems(int n) => ListField._(
+      required: _isRequired, minItems: n, maxItems: _maxItems, items: _items);
+  ListField maxItems(int n) => ListField._(
+      required: _isRequired, minItems: _minItems, maxItems: n, items: _items);
 
-  ListField required() =>
-      ListField._(required: true, minItems: _minItems, maxItems: _maxItems);
-  ListField minItems(int n) =>
-      ListField._(required: _isRequired, minItems: n, maxItems: _maxItems);
-  ListField maxItems(int n) =>
-      ListField._(required: _isRequired, minItems: _minItems, maxItems: n);
+  /// Validates every item against [item].
+  ListField of(Field item) => ListField._(
+      required: _isRequired,
+      minItems: _minItems,
+      maxItems: _maxItems,
+      items: item);
+
+  @override
+  bool get isRequired => _isRequired;
+
+  @override
+  Map<String, dynamic> toJsonSchema() => {
+        'type': 'array',
+        if (_minItems != null) 'minItems': _minItems,
+        if (_maxItems != null) 'maxItems': _maxItems,
+        if (_items != null) 'items': _items!.toJsonSchema(),
+      };
+
+  @override
+  dynamic coerce(dynamic raw) {
+    final items = _items;
+    if (items == null || raw is! List) return raw;
+    return [for (final item in raw) items.coerce(item)];
+  }
+
+  @override
+  void collectErrors(String name, dynamic raw, Map<String, String> errors) {
+    final error = validate(name, raw);
+    if (error != null) {
+      errors[name] = error;
+      return;
+    }
+    final items = _items;
+    if (items == null || raw is! List) return;
+    for (var i = 0; i < raw.length; i++) {
+      items.collectErrors('$name[$i]', raw[i], errors);
+    }
+  }
 
   @override
   String? validate(String fieldName, dynamic raw) {
@@ -264,6 +366,49 @@ class ListField extends Field {
     if (_maxItems != null && raw.length > _maxItems!) {
       return '$fieldName must have at most $_maxItems item(s)';
     }
+    return null;
+  }
+}
+
+/// Nested object field.
+class ObjectField extends Field {
+  final bool _isRequired;
+  final Map<String, Field> _fields;
+
+  const ObjectField._(this._fields, {bool required = false})
+      : _isRequired = required,
+        super._();
+
+  ObjectField required() => ObjectField._(_fields, required: true);
+
+  @override
+  bool get isRequired => _isRequired;
+
+  @override
+  Map<String, dynamic> toJsonSchema() => _objectSchema(_fields);
+
+  /// Keeps only the declared fields, each coerced.
+  @override
+  dynamic coerce(dynamic raw) =>
+      raw is Map<String, dynamic> ? _coerceFields(_fields, raw) : raw;
+
+  @override
+  void collectErrors(String name, dynamic raw, Map<String, String> errors) {
+    final error = validate(name, raw);
+    if (error != null) {
+      errors[name] = error;
+      return;
+    }
+    if (raw is! Map<String, dynamic>) return;
+    _fields.forEach((key, field) {
+      field.collectErrors('$name.$key', raw[key], errors);
+    });
+  }
+
+  @override
+  String? validate(String fieldName, dynamic raw) {
+    if (raw == null) return _isRequired ? '$fieldName is required' : null;
+    if (raw is! Map<String, dynamic>) return '$fieldName must be an object';
     return null;
   }
 }
@@ -284,6 +429,9 @@ class ListField extends Field {
 class BodySchema {
   final Map<String, Field> fields;
   const BodySchema(this.fields);
+
+  /// Describes this schema as a JSON Schema, for the generated API docs.
+  Map<String, dynamic> toJsonSchema() => _objectSchema(fields);
 }
 
 /// Validation middleware factory.
@@ -292,29 +440,36 @@ class BodySchema {
 /// Returns `422 Unprocessable Entity` with a map of field-level errors
 /// if validation fails.
 ///
+/// On success, `req.context[contextKey]` (default `'validated'`) holds the
+/// declared fields only, coerced to their types: `"42"` becomes `42` for an
+/// [IntField]. `req.body` is left as it was received.
+///
 /// ```dart
 /// Route.post(
 ///   path: '/users',
-///   handler: createUser,
+///   handler: (req) async {
+///     final user = req.context['validated'] as Map<String, dynamic>;
+///     final age = user['age'] as int?;
+///     ...
+///   },
 ///   middlewares: [validate(createUserSchema)],
 /// )
 ///
 /// // On failure — 422:
-/// // {"errors": {"email": "email is required", "role": "role must be one of: admin, user"}}
+/// // {"errors": {"email": "email is required", "address.city": "address.city is required"}}
 /// ```
-Middleware validate(BodySchema schema) {
-  return (Request req, Next next) async {
+///
+/// On a route's own `middlewares`, the schema also appears in the API docs at
+/// `/quadrant_docs`.
+Middleware validate(BodySchema schema, {String contextKey = 'validated'}) {
+  Future<Response> middleware(Request req, Next next) async {
     final body = req.body;
     final data = body is Map ? body as Map<String, dynamic> : <String, dynamic>{};
     final errors = <String, String>{};
 
-    for (final entry in schema.fields.entries) {
-      final fieldName = entry.key;
-      final field = entry.value;
-      final raw = data[fieldName];
-      final error = field.validate(fieldName, raw);
-      if (error != null) errors[fieldName] = error;
-    }
+    schema.fields.forEach((name, field) {
+      field.collectErrors(name, data[name], errors);
+    });
 
     if (errors.isNotEmpty) {
       return Response(
@@ -324,11 +479,47 @@ Middleware validate(BodySchema schema) {
       );
     }
 
+    req.setContext(contextKey, _coerceFields(schema.fields, data));
     return next();
-  };
+  }
+
+  _schemas[middleware] = schema;
+  return middleware;
 }
 
+final _schemas = Expando<BodySchema>('quadrant_validate_schema');
+
+/// The schema of a [validate] middleware, or null for any other middleware.
+///
+/// This is an **internal** API — not part of the public surface.
+BodySchema? schemaOf(Middleware middleware) => _schemas[middleware];
+
 // ─── Private helpers ──────────────────────────────────────────
+
+Map<String, dynamic> _coerceFields(
+  Map<String, Field> fields,
+  Map<String, dynamic> data,
+) =>
+    {
+      for (final entry in fields.entries)
+        if (data.containsKey(entry.key))
+          entry.key: entry.value.coerce(data[entry.key]),
+    };
+
+Map<String, dynamic> _objectSchema(Map<String, Field> fields) {
+  final required = [
+    for (final entry in fields.entries)
+      if (entry.value.isRequired) entry.key,
+  ];
+  return {
+    'type': 'object',
+    if (required.isNotEmpty) 'required': required,
+    'properties': {
+      for (final entry in fields.entries)
+        entry.key: entry.value.toJsonSchema(),
+    },
+  };
+}
 
 final _emailRegex = RegExp(
   r'^[a-zA-Z0-9.!#$%&'

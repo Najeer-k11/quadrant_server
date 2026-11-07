@@ -6,7 +6,7 @@ import 'package:quadrant_server/quadrant_server.dart';
 import 'package:quadrant_server/src/middlewares/cookie_parser.dart';
 import 'package:quadrant_server/src/middlewares/static_files.dart'
     show isPathWithinRoot;
-import 'package:quadrant_server/src/router.dart';
+import 'package:quadrant_server/src/routing/router.dart';
 import 'package:test/test.dart';
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -217,6 +217,82 @@ void main() {
     test('is case-insensitive on method', () {
       final result = router.match('get', '/users');
       expect(result, isA<Matched>());
+    });
+  });
+
+  group('Router matching rules', () {
+    Route get(String path) => Route.get(path: path, handler: _ok);
+
+    Matched match(Router router, String path) =>
+        router.match('GET', path) as Matched;
+
+    test('the first registered route wins', () {
+      final paramFirst = Router([get('/users/:id'), get('/users/me')]);
+      expect(match(paramFirst, '/users/me').route.path, '/users/:id');
+
+      final staticFirst = Router([get('/users/me'), get('/users/:id')]);
+      expect(match(staticFirst, '/users/me').route.path, '/users/me');
+    });
+
+    test('a wildcard matches its own prefix with an empty capture', () {
+      final router = Router([get('/files/*')]);
+      expect(match(router, '/files').params, {'*': ''});
+      expect(match(router, '/files/a/b/').params, {'*': 'a/b'});
+    });
+
+    test('a wildcard route can also capture named params', () {
+      final router = Router([get('/u/:id/*')]);
+      expect(match(router, '/u/42/a/b').params, {'id': '42', '*': 'a/b'});
+      expect(router.match('GET', '/u'), isA<NotFound>());
+    });
+
+    test('params are URI-decoded, wildcard captures are not', () {
+      final router = Router([get('/p/:name'), get('/w/*')]);
+      expect(match(router, '/p/a%20b').params, {'name': 'a b'});
+      expect(match(router, '/w/a%20b').params, {'*': 'a%20b'});
+    });
+
+    test('repeated and trailing slashes are ignored', () {
+      final router = Router([get('/a/b')]);
+      expect(match(router, '//a///b/').route.path, '/a/b');
+    });
+
+    test('the root path matches only the root route', () {
+      final router = Router([get('/'), get('/a')]);
+      expect(match(router, '/').route.path, '/');
+      expect(match(router, '/a').route.path, '/a');
+    });
+
+    test('405 lists every method for the path, with HEAD for GET', () {
+      final router = Router([
+        get('/a/:id'),
+        Route.put(path: '/a/:id', handler: _ok),
+      ]);
+      final result = router.match('POST', '/a/1') as MethodNotAllowed;
+      expect(result.allowedMethods, ['GET', 'PUT', 'HEAD']);
+    });
+
+    test('a param with bad UTF-8 on the wrong method is still a 405', () {
+      final router = Router([get('/a/:id')]);
+      expect(router.match('POST', '/a/%FF'), isA<MethodNotAllowed>());
+    });
+
+    test('a param with bad UTF-8 is reported as malformed', () {
+      final router = Router([get('/a/:id')]);
+      expect(router.match('GET', '/a/%FF'), isA<MalformedPath>());
+      expect(router.match('GET', '/a/ok'), isA<Matched>());
+    });
+
+    test('upgrade requests only match WebSocket routes', () {
+      final router = Router(
+        [get('/x')],
+        webSocketRoutes: [
+          WebSocketRoute(path: '/ws/:room', onMessage: (ctx, data) async {}),
+        ],
+      );
+      final ws = router.match('GET', '/ws/1', isUpgradeRequest: true);
+      expect((ws as MatchedWebSocket).params, {'room': '1'});
+      expect(router.match('GET', '/x', isUpgradeRequest: true), isA<NotFound>());
     });
   });
 
@@ -444,6 +520,172 @@ void main() {
       expect(result.headers['x-ratelimit-limit'], '10');
     });
 
+    group('trustedProxyHops', () {
+      Future<int> statusOf(Middleware mw, String? forwarded, String socketIp) async {
+        final res = await mw(
+          _FakeRequest(
+            headers: {if (forwarded != null) 'x-forwarded-for': forwarded},
+            rawRequest: _FakeHttpRequestWithIp(InternetAddress(socketIp)),
+          ),
+          () async => Response.ok('ok'),
+        );
+        return res.statusCode;
+      }
+
+      Middleware limiter(int hops) => rateLimit(
+            maxRequests: 1,
+            window: const Duration(minutes: 1),
+            trustedProxyHops: hops,
+          );
+
+      test('clients behind one proxy get separate limits', () async {
+        final mw = limiter(1);
+        expect(await statusOf(mw, '1.1.1.1', '10.0.0.1'), 200);
+        expect(await statusOf(mw, '2.2.2.2', '10.0.0.1'), 200);
+        expect(await statusOf(mw, '1.1.1.1', '10.0.0.1'), 429);
+      });
+
+      test('a client cannot escape its limit by forging the header', () async {
+        final mw = limiter(1);
+        // The proxy appends the real IP, so only the left part is forged.
+        expect(await statusOf(mw, 'forged-1, 1.1.1.1', '10.0.0.1'), 200);
+        expect(await statusOf(mw, 'forged-2, 1.1.1.1', '10.0.0.1'), 429);
+      });
+
+      test('counts hops from the right', () async {
+        final mw = limiter(2);
+        expect(await statusOf(mw, 'forged-1, 1.1.1.1, 9.9.9.9', '10.0.0.1'), 200);
+        expect(await statusOf(mw, 'forged-2, 1.1.1.1, 8.8.8.8', '10.0.0.1'), 429);
+      });
+
+      test('falls back to the socket IP with too few entries', () async {
+        final mw = limiter(2);
+        expect(await statusOf(mw, '1.1.1.1', '10.0.0.1'), 200);
+        expect(await statusOf(mw, '2.2.2.2', '10.0.0.1'), 429);
+      });
+
+      test('the header is ignored by default', () async {
+        final mw = limiter(0);
+        expect(await statusOf(mw, '1.1.1.1', '10.0.0.1'), 200);
+        expect(await statusOf(mw, '2.2.2.2', '10.0.0.1'), 429);
+      });
+
+      test('rejects a negative count', () {
+        expect(
+          () => rateLimit(
+            maxRequests: 1,
+            window: const Duration(minutes: 1),
+            trustedProxyHops: -1,
+          ),
+          throwsArgumentError,
+        );
+      });
+    });
+
+    group('IPv6 clients', () {
+      Future<int> statusOf(Middleware mw, String socketIp,
+          [String? forwarded]) async {
+        final res = await mw(
+          _FakeRequest(
+            headers: {if (forwarded != null) 'x-forwarded-for': forwarded},
+            rawRequest: _FakeHttpRequestWithIp(InternetAddress(socketIp)),
+          ),
+          () async => Response.ok('ok'),
+        );
+        return res.statusCode;
+      }
+
+      Middleware limiter([int hops = 0]) => rateLimit(
+            maxRequests: 1,
+            window: const Duration(minutes: 1),
+            trustedProxyHops: hops,
+          );
+
+      test('addresses in one /64 share a limit', () async {
+        final mw = limiter();
+        expect(await statusOf(mw, '2001:db8:1:2::a'), 200);
+        expect(await statusOf(mw, '2001:db8:1:2:ffff:ffff:ffff:b'), 429);
+      });
+
+      test('different /64s get separate limits', () async {
+        final mw = limiter();
+        expect(await statusOf(mw, '2001:db8:1:2::a'), 200);
+        expect(await statusOf(mw, '2001:db8:1:3::a'), 200);
+      });
+
+      test('grouping also applies to X-Forwarded-For', () async {
+        final mw = limiter(1);
+        expect(await statusOf(mw, '10.0.0.1', '2001:db8:1:2::a'), 200);
+        expect(await statusOf(mw, '10.0.0.1', '2001:DB8:1:2:0:0:0:b'), 429);
+      });
+
+      test('an IPv4-mapped address counts as that IPv4 address', () async {
+        final mw = limiter(1);
+        expect(await statusOf(mw, '10.0.0.1', '1.1.1.1'), 200);
+        expect(await statusOf(mw, '10.0.0.1', '::ffff:1.1.1.1'), 429);
+      });
+
+      test('an entry that is not an address is still a usable key', () async {
+        final mw = limiter(1);
+        expect(await statusOf(mw, '10.0.0.1', 'not:an:address'), 200);
+        expect(await statusOf(mw, '10.0.0.1', 'not:an:address'), 429);
+      });
+    });
+
+    group('maxKeys', () {
+      Future<int> statusOf(Middleware mw, String key) async {
+        final res = await mw(
+          _FakeRequest(headers: {'x-api-key': key}),
+          () async => Response.ok('ok'),
+        );
+        return res.statusCode;
+      }
+
+      Middleware limiter(int maxKeys) => rateLimit(
+            maxRequests: 1,
+            window: const Duration(minutes: 1),
+            keyExtractor: (req) => req.headers['x-api-key']!,
+            maxKeys: maxKeys,
+          );
+
+      test('the oldest client is forgotten past the limit', () async {
+        final mw = limiter(2);
+        expect(await statusOf(mw, 'a'), 200);
+        expect(await statusOf(mw, 'b'), 200);
+        expect(await statusOf(mw, 'a'), 429);
+        expect(await statusOf(mw, 'c'), 200); // forgets a
+        expect(await statusOf(mw, 'a'), 200); // forgets b
+        expect(await statusOf(mw, 'c'), 429);
+      });
+
+      test('clients within the limit keep their counts', () async {
+        final mw = limiter(100);
+        for (var i = 0; i < 100; i++) {
+          expect(await statusOf(mw, 'client-$i'), 200);
+        }
+        for (var i = 0; i < 100; i++) {
+          expect(await statusOf(mw, 'client-$i'), 429);
+        }
+      });
+
+      test('a flood frees room in batches and stays within the limit', () async {
+        final mw = limiter(100);
+        for (var i = 0; i < 1000; i++) {
+          expect(await statusOf(mw, 'client-$i'), 200);
+        }
+        // The newest 90 survive the last batch at minimum.
+        for (var i = 910; i < 1000; i++) {
+          expect(await statusOf(mw, 'client-$i'), 429);
+        }
+        // And the first was forgotten long ago.
+        expect(await statusOf(mw, 'client-0'), 200);
+      });
+
+      test('rejects a value below 1', () {
+        expect(() => limiter(0), throwsArgumentError);
+      });
+    });
+
     test('custom keyExtractor is used for bucketing', () async {
       final mw = rateLimit(
         maxRequests: 1,
@@ -592,6 +834,22 @@ void main() {
       expect(res.headers.containsKey('x-request-id'), isTrue);
       final id = res.headers['x-request-id']!;
       expect(id, matches(RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')));
+    });
+
+    test('generates distinct, valid UUID v4 values', () async {
+      final mw = requestId();
+      final seen = <String>{};
+      for (var i = 0; i < 2000; i++) {
+        final res = await mw(_FakeRequest(), () async => Response.ok('ok'));
+        final id = res.headers['x-request-id']!;
+        expect(
+          id,
+          matches(RegExp(
+              r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')),
+        );
+        seen.add(id);
+      }
+      expect(seen, hasLength(2000));
     });
 
     test('reuses existing X-Request-ID from incoming headers', () async {
@@ -745,6 +1003,74 @@ void main() {
   });
 
   // ─── ETag middleware ─────────────────────────────────────────
+
+  group('IP filter trustedProxyHops', () {
+    Future<int> statusOf(Middleware mw, String? forwarded,
+        {String socketIp = '10.0.0.1'}) async {
+      final res = await mw(
+        _FakeRequest(
+          headers: {if (forwarded != null) 'x-forwarded-for': forwarded},
+          rawRequest: _FakeHttpRequestWithIp(InternetAddress(socketIp)),
+        ),
+        () async => Response.ok('ok'),
+      );
+      return res.statusCode;
+    }
+
+    final allowClient = ipFilter(allow: ['1.1.1.1'], trustedProxyHops: 1);
+
+    test('judges the client rather than the proxy', () async {
+      expect(await statusOf(allowClient, '1.1.1.1'), 200);
+      expect(await statusOf(allowClient, '2.2.2.2'), 403);
+    });
+
+    test('deny lists use the client IP too', () async {
+      final mw = ipFilter(deny: ['1.1.1.1'], trustedProxyHops: 1);
+      expect(await statusOf(mw, '1.1.1.1'), 403);
+      expect(await statusOf(mw, '2.2.2.2'), 200);
+    });
+
+    test('a forged entry cannot get past an allow list', () async {
+      expect(await statusOf(allowClient, '1.1.1.1, 2.2.2.2'), 403);
+    });
+
+    test('counts hops from the right', () async {
+      final mw = ipFilter(allow: ['1.1.1.1'], trustedProxyHops: 2);
+      expect(await statusOf(mw, 'forged, 1.1.1.1, 9.9.9.9'), 200);
+      expect(await statusOf(mw, 'forged, 2.2.2.2, 1.1.1.1'), 403);
+    });
+
+    test('does not fall back to an allowed proxy IP', () async {
+      final mw = ipFilter(allow: ['10.0.0.0/8'], trustedProxyHops: 2);
+      expect(await statusOf(mw, '1.1.1.1'), 403, reason: 'too few entries');
+      final one = ipFilter(allow: ['10.0.0.0/8'], trustedProxyHops: 1);
+      expect(await statusOf(one, 'not-an-ip'), 403, reason: 'unparseable');
+      expect(await statusOf(one, '1.1.1.1:443'), 403, reason: 'has a port');
+    });
+
+    test('without the header, judges the connection', () async {
+      expect(await statusOf(allowClient, null, socketIp: '1.1.1.1'), 200);
+      expect(await statusOf(allowClient, null), 403);
+    });
+
+    test('the header is ignored by default', () async {
+      final mw = ipFilter(allow: ['10.0.0.1']);
+      expect(await statusOf(mw, '2.2.2.2'), 200);
+    });
+
+    test('onDeny is used when the forwarded IP is unusable', () async {
+      final mw = ipFilter(
+        allow: ['1.1.1.1'],
+        trustedProxyHops: 1,
+        onDeny: (req) => Response.text('nope', statusCode: 418),
+      );
+      expect(await statusOf(mw, 'not-an-ip'), 418);
+    });
+
+    test('rejects a negative count', () {
+      expect(() => ipFilter(trustedProxyHops: -1), throwsArgumentError);
+    });
+  });
 
   group('ETag middleware', () {
     test('adds weak ETag to 200 response with body', () async {
@@ -902,6 +1228,179 @@ void main() {
 
   // ─── Health check endpoint ───────────────────────────────────
 
+  group('Nested validation', () {
+    final schema = BodySchema({
+      'age': Field.int_().required(),
+      'active': Field.bool_(),
+      'address': Field.object({
+        'city': Field.string().required(),
+        'zip': Field.int_(),
+      }).required(),
+      'scores': Field.list().of(Field.int_().max(100)),
+    });
+
+    Future<(Response, Map<String, dynamic>?)> run(Object? body) async {
+      // A real chain is needed for setContext, so read it back from a server.
+      Map<String, dynamic>? validated;
+      final app = QuadrantServer(
+        middlewares: [bodyParser()],
+        routes: [
+          Route.post(
+            path: '/',
+            middlewares: [validate(schema)],
+            handler: (req) async {
+              validated = req.context['validated'] as Map<String, dynamic>;
+              expect(req.body, body, reason: 'req.body must stay as received');
+              return Response.ok('ok');
+            },
+          ),
+        ],
+      );
+      final server = await app.listen(
+        port: 0,
+        address: InternetAddress.loopbackIPv4,
+      );
+      final client = HttpClient();
+      try {
+        final req = await client.post('127.0.0.1', server.port, '/');
+        req.headers.contentType = ContentType.json;
+        req.write(jsonEncode(body));
+        final res = await req.close();
+        final text = await res.transform(utf8.decoder).join();
+        return (Response(statusCode: res.statusCode, body: text), validated);
+      } finally {
+        client.close(force: true);
+        await app.close(force: true);
+      }
+    }
+
+    test('coerces values, drops undeclared fields, leaves req.body alone',
+        () async {
+      final (res, validated) = await run({
+        'age': '42',
+        'active': 'yes',
+        'admin': true,
+        'address': {'city': 'Oslo', 'zip': '150', 'extra': 1},
+        'scores': ['1', 2],
+      });
+      expect(res.statusCode, 200, reason: res.body);
+      expect(validated, {
+        'age': 42,
+        'active': true,
+        'address': {'city': 'Oslo', 'zip': 150},
+        'scores': [1, 2],
+      });
+    });
+
+    test('leaves absent optional fields out', () async {
+      final (_, validated) = await run({
+        'age': 1,
+        'address': {'city': 'Oslo'},
+      });
+      expect(validated, {
+        'age': 1,
+        'address': {'city': 'Oslo'},
+      });
+    });
+
+    test('reports errors by path', () async {
+      final (res, _) = await run({
+        'age': 1,
+        'address': {'zip': 'x'},
+        'scores': [1, 'y', 500],
+      });
+      expect(res.statusCode, 422);
+      final errors = (jsonDecode(res.body) as Map)['errors'] as Map;
+      expect(errors.keys, unorderedEquals([
+        'address.city',
+        'address.zip',
+        'scores[1]',
+        'scores[2]',
+      ]));
+    });
+
+    test('a nested value of the wrong type is an error, not a crash', () async {
+      final (res, _) = await run({
+        'age': 1,
+        'address': 'not an object',
+        'scores': 'not a list',
+      });
+      expect(res.statusCode, 422);
+      final errors = (jsonDecode(res.body) as Map)['errors'] as Map;
+      expect(errors.keys, unorderedEquals(['address', 'scores']));
+    });
+  });
+
+  group('Generated API docs', () {
+    test('include validate() schemas, safely embedded in the page', () async {
+      final app = QuadrantServer(
+        docs: true,
+        routes: [
+          Route.post(
+            path: '/users',
+            handler: _ok,
+            middlewares: [
+              validate(BodySchema({
+                'name': Field.string()
+                    .matches(RegExp('</script>'))
+                    .required(),
+                'age': Field.int_().min(18),
+                'tags': Field.list().of(Field.string()),
+                'address': Field.object({'city': Field.string().required()}),
+              })),
+            ],
+          ),
+          Route.get(path: '/plain', handler: _ok),
+        ],
+      );
+      final server = await app.listen(
+        port: 0,
+        address: InternetAddress.loopbackIPv4,
+      );
+      final client = HttpClient();
+      addTearDown(() async {
+        client.close(force: true);
+        await app.close(force: true);
+      });
+
+      final req = await client.get('127.0.0.1', server.port, '/quadrant_docs');
+      final html = await (await req.close()).transform(utf8.decoder).join();
+      expect(
+        html.indexOf('</script>', html.indexOf('const spec')),
+        greaterThan(html.indexOf('SwaggerUIBundle({')),
+        reason: 'the pattern must not close the script tag early',
+      );
+
+      final json = RegExp(r'const spec = (.*);\n').firstMatch(html)!.group(1)!;
+      final paths = (jsonDecode(json) as Map)['paths'] as Map;
+
+      final post = (paths['/users'] as Map)['post'] as Map;
+      final body = post['requestBody'] as Map;
+      final content = body['content'] as Map;
+      final schema = (content['application/json'] as Map)['schema'] as Map;
+      expect(schema['required'], ['name']);
+      expect(schema['properties'], {
+        'name': {'type': 'string', 'pattern': '</script>'},
+        'age': {'type': 'integer', 'minimum': 18},
+        'tags': {
+          'type': 'array',
+          'items': {'type': 'string'},
+        },
+        'address': {
+          'type': 'object',
+          'required': ['city'],
+          'properties': {
+            'city': {'type': 'string'},
+          },
+        },
+      });
+      expect((post['responses'] as Map).keys, contains('422'));
+
+      final plain = (paths['/plain'] as Map)['get'] as Map;
+      expect(plain.containsKey('requestBody'), isFalse);
+    });
+  });
+
   group('Server health check', () {
     test('GET /health returns status ok with uptime and request count', () async {
       final app = QuadrantServer(
@@ -1043,6 +1542,22 @@ void main() {
       expect(await get('/ok'), 200);
     });
 
+    test('a path param with bad UTF-8 answers 400', () async {
+      expect(await get('/ok'), 200);
+      final app = QuadrantServer(routes: [
+        Route.get(path: '/u/:id', handler: _echo),
+      ]);
+      final other = await app.listen(
+        port: 0,
+        address: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(() => app.close(force: true));
+      final res = await (await client.get('127.0.0.1', other.port, '/u/%FF'))
+          .close();
+      await res.drain<void>();
+      expect(res.statusCode, 400);
+    });
+
     test('a query string with bad UTF-8 is still served', () async {
       expect(await get('/ok?a=%FF'), 200);
     });
@@ -1066,6 +1581,44 @@ void main() {
     ];
 
     for (final (name, contentType, parser) in cases) {
+      // These never finish sending, so a 413 can only be one that did not wait
+      // for the rest of the body. dart:io would lose it or delay it if asked to
+      // stop reading in the usual way.
+      Future<String> responseToUnfinished(String headersAndStart) async {
+        final app = QuadrantServer(routes: [
+          Route.post(path: '/', handler: _ok, middlewares: [parser]),
+        ]);
+        final server = await app.listen(port: 0);
+        final socket = await Socket.connect(
+            InternetAddress.loopbackIPv4, server.port);
+        try {
+          socket.write('POST / HTTP/1.1\r\nHost: x\r\n'
+              'Content-Type: $contentType\r\n$headersAndStart');
+          await socket.flush();
+          return await latin1.decodeStream(socket).timeout(
+              const Duration(seconds: 5),
+              onTimeout: () => 'timed out');
+        } finally {
+          socket.destroy();
+          await app.close(force: true);
+        }
+      }
+
+      test('$name answers 413 for a declared size without reading it',
+          () async {
+        final response =
+            await responseToUnfinished('Content-Length: 1073741824\r\n\r\n');
+        expect(response, startsWith('HTTP/1.1 413'));
+        expect(response.toLowerCase(), contains('connection: close'));
+      });
+
+      test('$name answers 413 while the rest of the body is on its way',
+          () async {
+        final response = await responseToUnfinished(
+            'Transfer-Encoding: chunked\r\n\r\n40\r\n${'x' * 64}\r\n');
+        expect(response, startsWith('HTTP/1.1 413'));
+      });
+
       test('$name returns 413 once the body passes the limit', () async {
         final app = QuadrantServer(routes: [
           Route.post(path: '/', handler: _ok, middlewares: [parser]),
@@ -1089,6 +1642,89 @@ void main() {
   });
 
   // ─── Memory: big bodies and files ────────────────────────────
+
+  group('multipartParser correctness', () {
+    late HttpServer server;
+    late HttpClient client;
+    Object? seenByOnError;
+
+    setUp(() async {
+      seenByOnError = null;
+      server = await QuadrantServer(
+        onError: (error, req) {
+          seenByOnError = error;
+          return Response.internalServerError('handled');
+        },
+        routes: [
+          Route.post(
+            path: '/upload',
+            middlewares: [multipartParser()],
+            handler: (req) async {
+              final files = req.context['files'] as List<UploadedFile>;
+              final fields = req.context['fields'] as Map<String, String>;
+              return Response.ok({
+                'files': [for (final f in files) utf8.decode(f.bytes)],
+                'fields': fields,
+              });
+            },
+          ),
+          Route.post(
+            path: '/throws',
+            middlewares: [multipartParser()],
+            handler: (req) async => throw StateError('database is down'),
+          ),
+        ],
+      ).listen(port: 0, address: InternetAddress.loopbackIPv4);
+      client = HttpClient();
+    });
+
+    tearDown(() async {
+      client.close(force: true);
+      await server.close(force: true);
+    });
+
+    Future<(int, String)> post(String path, String body) async {
+      final req = await client.post('127.0.0.1', server.port, path);
+      req.headers.set('content-type', 'multipart/form-data; boundary=b');
+      req.write(body);
+      final res = await req.close();
+      return (res.statusCode, await res.transform(utf8.decoder).join());
+    }
+
+    const field = '--b\r\n'
+        'content-disposition: form-data; name="title"\r\n\r\n'
+        'hello\r\n';
+    const fileStart = '--b\r\n'
+        'content-disposition: form-data; name="f"; filename="a.txt"\r\n\r\n'
+        'contents';
+
+    test('a complete body reaches the handler', () async {
+      final (status, body) = await post('/upload', '$field$fileStart\r\n--b--\r\n');
+      expect(status, 200);
+      expect(jsonDecode(body), {
+        'files': ['contents'],
+        'fields': {'title': 'hello'},
+      });
+    });
+
+    test('an error in the handler reaches onError, not a 400', () async {
+      final (status, body) = await post('/throws', '$field--b--\r\n');
+      expect(status, 500);
+      expect(body, contains('handled'));
+      expect(seenByOnError, isA<StateError>());
+    });
+
+    test('a file cut off before its delimiter is rejected', () async {
+      final (status, _) = await post('/upload', '$field$fileStart');
+      expect(status, 400);
+    });
+
+    test('a body that stops at a delimiter without the end is rejected',
+        () async {
+      final (status, _) = await post('/upload', '$fileStart\r\n--b');
+      expect(status, 400);
+    });
+  });
 
   group('Big bodies and files fit in a 64 MB heap', () {
     // Bytes kept in a List<int> cost 8 bytes each plus room to grow, which
@@ -1153,6 +1789,19 @@ void main() {
       expect(
         await post('/upload', 'multipart/form-data; boundary=b', parts),
         '200 ${8 * mb}',
+      );
+    });
+
+    test('multipartParser(diskThreshold:) takes a 200 MB file', () async {
+      final parts = [
+        utf8.encode('--b\r\nContent-Disposition: form-data; name="f"; '
+            'filename="a.bin"\r\n\r\n'),
+        for (var i = 0; i < 25; i++) Uint8List(8 * mb),
+        utf8.encode('\r\n--b--\r\n'),
+      ];
+      expect(
+        await post('/upload-to-disk', 'multipart/form-data; boundary=b', parts),
+        '200 ${200 * mb}',
       );
     });
 

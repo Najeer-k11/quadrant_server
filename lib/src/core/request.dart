@@ -28,12 +28,13 @@ class Request {
 
   /// Arbitrary per-request context map.
   ///
-  /// Middlewares may write typed values here (e.g. an authenticated user)
-  /// for downstream handlers to consume.
+  /// Middlewares add typed values with [setContext] (e.g. an authenticated
+  /// user) for downstream middlewares and handlers to consume.
   ///
   /// ```dart
   /// // In a middleware:
-  /// return next(req.copyWith(context: {...req.context, 'user': user}));
+  /// req.setContext('user', user);
+  /// return next();
   /// // In a handler:
   /// final user = req.context['user'] as MyUser;
   /// ```
@@ -98,6 +99,18 @@ class Request {
     );
   }
 
+  /// Adds a value to [context] for everything later in the chain: the
+  /// following middlewares, the handler, and WebSocket callbacks.
+  ///
+  /// Call it in a middleware before `next()`. This [Request] object does not
+  /// change, so the new value appears in the `req` that later steps receive.
+  void setContext(String key, Object? value) {
+    _pendingContext[raw] = {
+      ...(_pendingContext[raw] ?? context),
+      key: value,
+    };
+  }
+
   // ─── Typed body helpers ──────────────────────────────────────
 
   /// Returns the body as a [Map<String, dynamic>], or null if absent / wrong type.
@@ -141,4 +154,15 @@ class Request {
     if (raw == 'false' || raw == '0' || raw == 'no') return false;
     return defaultValue;
   }
+}
+
+final _pendingContext = Expando<Map<String, dynamic>>('quadrant_set_context');
+
+/// Takes the values added with [Request.setContext] since the last call.
+///
+/// This is an **internal** API — not part of the public surface.
+Map<String, dynamic>? consumeSetContext(Object rawRequest) {
+  final pending = _pendingContext[rawRequest];
+  if (pending != null) _pendingContext[rawRequest] = null;
+  return pending;
 }

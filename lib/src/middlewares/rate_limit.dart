@@ -1,8 +1,12 @@
-import 'dart:collection';
+import '../utils/client_ip.dart';
+import '../cluster/cluster_link.dart';
+import '../core/middleware.dart';
+import '../core/request.dart';
+import '../core/response.dart';
+import '../utils/sliding_window.dart';
 
-import '../middleware.dart';
-import '../request.dart';
-import '../response.dart';
+// Limiters are matched up across isolates by creation order.
+var _nextLimiterId = 0;
 
 /// Rate-limiting middleware using a sliding-window (request log) algorithm.
 ///
@@ -28,87 +32,90 @@ import '../response.dart';
 /// [keyExtractor] — optional function to customise the rate-limit key.
 /// Defaults to the client's remote IP address. Override to key on, e.g.,
 /// an API key header instead of IP.
+///
+/// [trustedProxyHops] — the number of proxies in front of this server. Behind
+/// a proxy, every request appears to come from the proxy's IP, so all clients
+/// would share one limit. With this set, the client IP is read from
+/// `X-Forwarded-For`, counting that many entries from the right: entries your
+/// own proxies appended, which a client cannot forge. Leave it at `0` (the
+/// default) when not behind a proxy, or clients can pick their own key.
+///
+/// By default, IPv6 clients are grouped by /64, because one client usually
+/// controls that whole range and could otherwise use a new address per request.
+///
+/// [maxKeys] — the most clients tracked at once, so that a flood of new keys
+/// cannot use up the server's memory. Past it, idle clients are forgotten first
+/// and then the oldest ones, whose counts start again. Defaults to 100,000.
+///
+/// Counts are kept in memory. In a `QuadrantCluster`, all isolates share one
+/// count; separate processes or machines do not. If the main isolate is too
+/// busy to answer, an isolate counts on its own until it recovers, and a
+/// warning is printed.
 Middleware rateLimit({
   required int maxRequests,
   required Duration window,
   String Function(Request req)? keyExtractor,
+  int trustedProxyHops = 0,
+  int maxKeys = 100000,
 }) {
-  final buckets = <String, _Bucket>{};
+  if (trustedProxyHops < 0) {
+    throw ArgumentError.value(
+        trustedProxyHops, 'trustedProxyHops', 'Must not be negative.');
+  }
+  if (maxKeys < 1) {
+    throw ArgumentError.value(maxKeys, 'maxKeys', 'Must be at least 1.');
+  }
+
+  final limiterId = '${_nextLimiterId++}';
   final windowMs = window.inMilliseconds;
-  var lastSweepMs = DateTime.now().millisecondsSinceEpoch;
+  final local = SlidingWindowLimiter(maxRequests, windowMs, maxKeys);
 
   String defaultKey(Request req) {
-    return req.raw.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final forwarded = req.headers['x-forwarded-for'];
+    if (trustedProxyHops > 0 && forwarded != null) {
+      final client = forwardedClientIp(forwarded, trustedProxyHops);
+      if (client != null) return clientRateLimitKey(client);
+    }
+    final remote = req.raw.connectionInfo?.remoteAddress.address;
+    return remote == null ? 'unknown' : clientRateLimitKey(remote);
   }
 
   final getKey = keyExtractor ?? defaultKey;
 
   return (Request req, Next next) async {
     final key = getKey(req);
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final link = currentClusterLink;
+    final decision = link == null
+        ? local.check(key)
+        : await link.rateCheck(limiterId, maxRequests, windowMs, maxKeys, key) ??
+            local.check(key);
 
-    // Once per window, drop clients that have been idle for a full window so
-    // the map does not grow forever with every distinct client.
-    if (now - lastSweepMs > windowMs) {
-      lastSweepMs = now;
-      buckets.removeWhere(
-        (_, b) => b.timestamps.isEmpty || now - b.timestamps.last > windowMs,
-      );
-    }
+    final resetSeconds = (decision.resetAtMs / 1000).ceil();
 
-    // Lazy-create / fetch the bucket for this key.
-    final bucket = buckets.putIfAbsent(key, () => _Bucket(maxRequests));
-
-    // Remove timestamps outside the current window.
-    bucket.timestamps.removeWhere((ts) => now - ts > windowMs);
-
-    final remaining = maxRequests - bucket.timestamps.length;
-
-    if (remaining <= 0) {
-      // Compute when the oldest request will expire.
-      final oldestTs = bucket.timestamps.first;
-      final resetAt = oldestTs + windowMs;
-      final retryAfterSeconds = ((resetAt - now) / 1000).ceil();
-
+    if (!decision.allowed) {
+      final retryAfter = decision.retryAfterSeconds;
       return Response(
         statusCode: 429,
         headers: {
           'content-type': 'application/json',
           'x-ratelimit-limit': '$maxRequests',
           'x-ratelimit-remaining': '0',
-          'x-ratelimit-reset': '${(resetAt / 1000).ceil()}',
-          'retry-after': '$retryAfterSeconds',
+          'x-ratelimit-reset': '$resetSeconds',
+          'retry-after': '$retryAfter',
         },
-        body: '{"error":"Too Many Requests","retryAfter":$retryAfterSeconds}',
+        body: '{"error":"Too Many Requests","retryAfter":$retryAfter}',
       );
     }
 
-    // Record this request.
-    bucket.timestamps.add(now);
-
     final response = await next();
-
-    // Recalculate remaining after recording this request.
-    final resetAt = bucket.timestamps.isNotEmpty
-        ? bucket.timestamps.first + windowMs
-        : now + windowMs;
 
     return response.copyWith(
       headers: {
         ...response.headers,
         'x-ratelimit-limit': '$maxRequests',
-        'x-ratelimit-remaining': '${maxRequests - bucket.timestamps.length}',
-        'x-ratelimit-reset': '${(resetAt / 1000).ceil()}',
+        'x-ratelimit-remaining': '${decision.remaining}',
+        'x-ratelimit-reset': '$resetSeconds',
       },
     );
   };
-}
-
-/// Internal bucket storing a sliding window of request timestamps per key.
-class _Bucket {
-  final int maxRequests;
-  // Use a Queue for O(1) front-removal when sliding the window.
-  final Queue<int> timestamps = Queue();
-
-  _Bucket(this.maxRequests);
 }

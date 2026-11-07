@@ -1,8 +1,9 @@
 import 'dart:io';
 
-import '../request.dart';
-import '../response.dart';
-import '../route.dart';
+import '../core/request.dart';
+import '../core/response.dart';
+import '../routing/route.dart';
+import '../core/stream_response.dart';
 
 /// Returns a [Handler] that serves static files from [rootDir].
 ///
@@ -91,16 +92,14 @@ Handler staticFiles(String rootDir, {bool indexFallback = true}) {
       'cache-control': 'public, max-age=3600',
     };
 
-    // Stream raw bytes from disk directly via the dart:io response, so the
-    // file is never held in memory. We bypass Response.body (String) to
-    // avoid UTF-8 corruption of binary assets (images, fonts, etc.).
-    req.raw.response.statusCode = 200;
-    headers.forEach(req.raw.response.headers.set);
-    await req.raw.response.addStream(target.openRead());
-    await req.raw.response.close();
+    if (req.method == 'HEAD') {
+      return Response(statusCode: 200, headers: headers);
+    }
 
-    // Return a sentinel — body already written above.
-    return const Response(statusCode: 200);
+    // Streamed, so the file is never held in memory and binary assets are not
+    // corrupted by the String-based Response.body. Returning it as a response
+    // lets middleware such as helmet() and cors() still add their headers.
+    return StreamResponse(stream: target.openRead(), headers: headers);
   };
 }
 
