@@ -6,6 +6,7 @@ Nothing needs changing for most apps, but these can change what a client sees:
 
 - `multipartParser()` now has limits it did not have before. An upload that does not fit in `maxBufferedBytes` (256 MB) gets a `503`, and a request over `maxParts` (1,000) or `maxFieldBytes` (10 MB) gets a `413`. Set any of them to `0` to turn it off.
 - `multipartParser()` answers `400` for a body without its closing delimiter, which it used to accept.
+- `Field.string()` answers `422` for a value that is not a string, such as `42`, which it used to accept. Use `Field.int_()` for a number, or send it as text.
 - Global middleware now runs for requests that match no route. See **Changed** below.
 
 ### Security
@@ -37,6 +38,7 @@ Nothing needs changing for most apps, but these can change what a client sees:
 
 ### Fixed
 
+- **`Field.string()` accepted any JSON type** — `{"name": 42}` or `{"name": {"a": 1}}` passed `validate()` and reached the handler unchanged, so `as String` there answered `500`. It now gets a `422`.
 - **`multipartParser()` turned handler errors into `400`s** — An exception from anything after it, including the handler, returned `400 Invalid multipart body` and skipped `onError`. It now reaches the usual error handling.
 - **A `413` from `bodyParser()`, `formParser()` and `multipartParser()` could be lost** — If the body was still arriving when it passed the limit, the connection closed with no response. If the declared size was over the limit, the whole body was read first. The response now goes out straight away, and the connection then closes. `bodyParser()` and `formParser()` also reject a declared size over the limit now.
 - **`multipartParser()` could take a file's `name` from its `filename`** — When `filename` came first in the header, as in `filename="a.txt"; name="f"`, `fieldName` was `a.txt`.

@@ -1,155 +1,133 @@
-# QuadrantServer — Example App
+# QuadrantServer example app
 
-A fully-featured reference application demonstrating every feature of the `quadrant_server` package.
+A small API you can run and deploy, showing the `quadrant_server` features you would use in production. It has a users API, file uploads, WebSocket chat, and configuration from the environment.
 
-## Project Structure
+To put it on a server, follow **[DEPLOY.md](DEPLOY.md)**.
 
-```
-example/
-├── lib/
-│   ├── main.dart                  ← Entry point — wires everything together
-│   ├── handlers/
-│   │   ├── users.dart             ← CRUD REST API with pagination & validation
-│   │   ├── chat.dart              ← WebSocket chat rooms using WebSocketGroup
-│   │   └── system.dart            ← Health, echo, redirect, catch-all routes
-│   └── middlewares/
-│       └── auth.dart              ← Bearer-token auth & admin-only guard
-├── Dockerfile                     ← Multi-stage AOT build → lean ~10MB image
-├── docker-compose.yml             ← Single-command deployment with healthcheck
-└── README.md
-```
-
-## Features Demonstrated
-
-| Feature | Where |
-|---|---|
-| `QuadrantRouter` prefix mounting | `main.dart` — `/api/v1` router |
-| Route-level middleware | `main.dart` — `requireAuth()` / `requireAdmin()` per route |
-| Global middleware | `main.dart` — `cors()`, `logger()`, `bodyParser()` |
-| Full CRUD REST API | `handlers/users.dart` |
-| Typed query helpers | `handlers/users.dart` — `queryInt`, `queryString` |
-| JSON body parsing | `handlers/users.dart` — `req.bodyAsMap` |
-| JSON array body | `handlers/system.dart` — `/echo` accepts both Map and List |
-| `Response.redirect()` | `handlers/system.dart` — `/api` → `/api/v1/info` |
-| `Response.text/html` | Available; use `Response.text('plain')` |
-| Wildcard catch-all route | `main.dart` — `/api/v1/unknown/*` |
-| WebSocket rooms | `handlers/chat.dart` — `WebSocketGroup` broadcast |
-| WS presence tracking | `handlers/chat.dart` — display name assignment |
-| WS ping/echo endpoint | `main.dart` + `handlers/chat.dart` — `/ws/ping` |
-| WS middleware guard | Extend: add `middlewares: [requireAuth()]` to `WebSocketRoute` |
-| `onError` global handler | `main.dart` — logs server-side, returns safe client message |
-| `PORT` env variable | `main.dart` — `int.tryParse(Platform.environment['PORT'])` |
-| Docker multi-stage build | `Dockerfile` — AOT compile → `debian:slim` runtime |
-
-## Running Locally
+## Run it
 
 ```bash
+cd example
 dart pub get
 dart run lib/main.dart
 ```
 
-Server starts on **http://localhost:5050**.
+The server listens on **http://localhost:5050**, with API docs at **http://localhost:5050/quadrant_docs**. In development it accepts two demo tokens, `secret-admin-token` and `secret-user-token`.
 
-## Running with Docker
+Run the tests with `dart test`.
 
-```bash
-docker compose up --build
+## Layout
+
+```
+example/
+├── lib/
+│   ├── main.dart            Starts the cluster, handles shutdown signals
+│   ├── app.dart             Routes and middleware, in buildServer()
+│   ├── config.dart          Settings from the environment
+│   ├── handlers/
+│   │   ├── users.dart       REST API with validation and paging
+│   │   ├── files.dart       Streaming uploads and downloads
+│   │   ├── chat.dart        WebSocket rooms
+│   │   └── system.dart      Info, echo, redirect
+│   └── middlewares/
+│       └── auth.dart        Bearer tokens and an admin check
+├── deploy/
+│   ├── quadrant-example.service   systemd unit
+│   ├── nginx.conf                 Reverse proxy
+│   ├── app.env.example            Production settings
+│   └── update.sh                  Build, deploy, and go back on failure
+├── Dockerfile
+├── docker-compose.yml
+├── DEPLOY.md
+└── test/
 ```
 
-## API Reference
+## Settings
 
-### Public endpoints (no auth)
+All are environment variables, and all are optional in development.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `APP_ENV` | | `production` turns off the docs and demo tokens, and turns on HSTS |
+| `ADMIN_TOKEN`, `USER_TOKEN` | | Required in production, at least 32 characters each |
+| `PORT` | `5050` | Port to listen on |
+| `ADDRESS` | `127.0.0.1` | Address to listen on. `0.0.0.0` accepts connections from anywhere |
+| `ISOLATES` | `1` | Number of isolates. See [the note on isolates](#isolates) |
+| `TRUSTED_PROXY_HOPS` | `0` | Proxies in front of the app. Set to `1` behind nginx, and leave at `0` without a proxy, or clients can dodge rate limits |
+| `CORS_ORIGIN` | `*` in development, otherwise none | Browser origin allowed to call the API |
+| `DATA_DIR` | `./data` | Where uploads are kept |
+
+The app exits with code `78` if a setting is wrong, and the systemd unit does not retry on that code.
+
+## What to look at
+
+| Feature | Where |
+|---|---|
+| `QuadrantCluster`, restarts and graceful shutdown | `lib/main.dart` |
+| Middleware, on all routes and on one route | `lib/app.dart` |
+| `rateLimit()` behind a proxy, with `trustedProxyHops` | `lib/app.dart` |
+| `validate()` with schemas | `lib/handlers/users.dart` |
+| `bearerAuth()` and roles | `lib/middlewares/auth.dart` |
+| `multipartParser(diskThreshold:)` and `moveTo()` | `lib/app.dart`, `lib/handlers/files.dart` |
+| `WebSocketGroup(name:)` across isolates | `lib/handlers/chat.dart` |
+| Built-in health check | `healthCheck: true` in `lib/app.dart` |
+
+### Isolates
+
+`ISOLATES` defaults to `1`, because users are kept in a variable, and a variable exists once per isolate. With more than one, a user created on one isolate would be missing on the others, and all of them are lost on restart. Rate limits and chat already work across isolates, so once users are in a database, open its connection inside `buildServer()` and raise `ISOLATES`.
+
+## Try the API
 
 ```bash
-# Health check
-curl http://localhost:5050/health
+export API=http://localhost:5050
+export ADMIN='Authorization: Bearer secret-admin-token'
+export USER_TOKEN='Authorization: Bearer secret-user-token'
 
-# API info
-curl http://localhost:5050/api/v1/info
+curl $API/health
+curl $API/api/v1/info
 
-# List users (with optional filter & pagination)
-curl http://localhost:5050/api/v1/users
-curl "http://localhost:5050/api/v1/users?role=admin&page=1&limit=5"
+# Reading is public
+curl "$API/api/v1/users?role=admin&page=1&limit=5"
+curl $API/api/v1/users/1
 
-# Get user by ID
-curl http://localhost:5050/api/v1/users/1
+# Writing needs a token
+curl -X POST $API/api/v1/users -H "$USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name": "Linus Torvalds"}'
 
-# Echo body (object or array)
-curl -X POST http://localhost:5050/api/v1/echo \
-  -H 'Content-Type: application/json' \
-  -d '{"hello":"world"}'
+curl -X PUT $API/api/v1/users/1 -H "$ADMIN" \
+  -H 'Content-Type: application/json' -d '{"name": "Ada", "role": "admin"}'
+
+curl -X PATCH $API/api/v1/users/2 -H "$USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name": "Grace M. Hopper"}'
+
+# Deleting needs an admin
+curl -X DELETE $API/api/v1/users/3 -H "$ADMIN"
+
+# Upload a file, up to 100 MB, then download it from the URL in the response
+curl -X POST $API/api/v1/files -H "$USER_TOKEN" -F 'file=@photo.jpg'
+curl -H "$USER_TOKEN" -o copy.jpg $API/api/v1/files/<name-from-the-response>.bin
 ```
 
-### Protected endpoints (require auth)
+Invalid bodies get a `422` listing the problems, and going over a rate limit gets a `429` with `Retry-After`.
 
-Use one of the demo tokens:
-- `secret-admin-token` — admin role (all write operations)
-- `secret-user-token` — user role (create/update, not delete)
+## Try the WebSockets
 
-```bash
-# Create user
-curl -X POST http://localhost:5050/api/v1/users \
-  -H 'Authorization: Bearer secret-admin-token' \
-  -H 'Content-Type: application/json' \
-  -d '{"name": "Linus Torvalds", "role": "user"}'
-
-# Update user
-curl -X PUT http://localhost:5050/api/v1/users/1 \
-  -H 'Authorization: Bearer secret-admin-token' \
-  -H 'Content-Type: application/json' \
-  -d '{"name": "Ada Lovelace", "role": "admin"}'
-
-# Partial update (PATCH)
-curl -X PATCH http://localhost:5050/api/v1/users/2 \
-  -H 'Authorization: Bearer secret-user-token' \
-  -H 'Content-Type: application/json' \
-  -d '{"name": "Grace M. Hopper"}'
-
-# Delete user (admin only)
-curl -X DELETE http://localhost:5050/api/v1/users/3 \
-  -H 'Authorization: Bearer secret-admin-token'
-```
-
-## WebSocket
-
-### Chat rooms
-
-Connect with any WebSocket client to: `ws://localhost:5050/ws/chat/<roomId>`
+The chat is public, so anyone who can reach it can join. It has rate limits on connecting and a size limit on messages, but add `requireAuth()` to its route if yours should be private.
 
 ```js
 const ws = new WebSocket('ws://localhost:5050/ws/chat/general');
-
 ws.onmessage = (e) => console.log(JSON.parse(e.data));
 
-// Set your display name
-ws.send(JSON.stringify({ name: 'Alice' }));
-
-// Send a chat message
-ws.send('Hello everyone!');
-
-// Send structured JSON
-ws.send(JSON.stringify({ text: 'Hello from JSON!', emoji: '👋' }));
+ws.send(JSON.stringify({ name: 'Alice' })); // Set your display name
+ws.send('Hello everyone!');                 // Send a message
 ```
-
-Server events you will receive:
 
 | Event | When |
 |---|---|
-| `welcome` | On connect — includes room name and current online count |
-| `user_joined` | Another user connected to your room |
-| `user_left` | Another user disconnected |
-| `user_renamed` | Another user set their display name |
-| `name_set` | Your name was set successfully |
-| `message` | A chat message from another user |
+| `welcome` | You connected. Includes the room and your guest name |
+| `name_set` | Your display name changed |
+| `user_joined`, `user_left`, `user_renamed` | Someone else in the room did that |
+| `message` | Someone else in the room sent a message |
+| `error` | Your message was refused, for being binary or too long |
 
-### Ping / echo
-
-```js
-const ws = new WebSocket('ws://localhost:5050/ws/ping');
-ws.send('hello');
-// Receives: {"event":"pong","echo":"hello","ts":1718000000000}
-```
-
-## Swagger UI Docs
-
-Visit **http://localhost:5050/quadrant_docs** for the interactive API explorer.
+`/ws/ping` answers each message with `{"event":"pong","echo":"...","ts":...}`, to test a connection.

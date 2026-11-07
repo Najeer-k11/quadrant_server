@@ -1,140 +1,105 @@
+// ignore_for_file: avoid_print
+import 'dart:async';
 import 'dart:io';
 
 import 'package:quadrant_server/quadrant_server.dart';
 
-import 'handlers/chat.dart';
-import 'handlers/system.dart';
-import 'handlers/users.dart';
-import 'middlewares/auth.dart';
+import 'app.dart';
+import 'config.dart';
 
-void main() async {
-  // ─── Port from environment (useful for Docker) ──────────────
-  final port = int.tryParse(Platform.environment['PORT'] ?? '') ?? 5050;
+/// `sysexits.h` EX_CONFIG. The systemd unit does not restart on this exit
+/// code, because a wrong setting will not fix itself.
+const _exitConfigError = 78;
 
-  // ─── API v1 router ───────────────────────────────────────────
-  //
-  // QuadrantRouter groups all routes under a shared prefix,
-  // avoiding repetition and making versioning trivial.
+/// Longer than this and in-flight requests are cut off. Keep it below
+/// `TimeoutStopSec` in the systemd unit and `stop_grace_period` in Compose.
+const _drainTimeout = Duration(seconds: 20);
 
-  final apiV1 = QuadrantRouter(prefix: '/api/v1')
-    // System
-    ..get('/info', getInfo)
-    ..post('/echo', echo)
-    // Users — full CRUD
-    ..get('/users', getUsers)
-    ..post('/users', createUser, middlewares: [requireAuth()])
-    ..get('/users/:id', getUser)
-    ..put('/users/:id', updateUser, middlewares: [requireAuth()])
-    ..patch('/users/:id', patchUser, middlewares: [requireAuth()])
-    ..delete('/users/:id', deleteUserImpl,
-        middlewares: [requireAuth(), requireAdmin()])
-    // Catch-all — any unmatched sub-path under /api/v1
-    ..get('/unknown/*', notFoundFallback);
+Future<void> main(List<String> args) async {
+  final env = Platform.environment;
 
-  // ─── Server ──────────────────────────────────────────────────
+  if (args.contains('--healthcheck')) {
+    exit(await _healthCheck(Config.portFrom(env)));
+  }
 
-  final app = QuadrantServer(
-    // Global middlewares — run on every request before route handlers.
-    middlewares: [
-      cors(origin: '*'),      // CORS — set a real origin in production
-      logger(),               // Logs: METHOD /path → STATUS (Xms)
-      bodyParser(),           // Parses JSON bodies into req.body
-    ],
+  final Config config;
+  try {
+    config = Config.fromEnvironment(env);
+  } on ConfigException catch (error) {
+    stderr.writeln('Configuration error: $error');
+    exit(_exitConfigError);
+  }
 
-    routes: [
-      // Redirect legacy /api → /api/v1/info
-      Route.get(path: '/api', handler: redirectToV1),
+  await prepareDataDirectories(config);
 
-      // Health check — no auth, no versioning prefix
-      Route.get(path: '/health', handler: getHealth),
-
-      // Mount the versioned API router
-      ...apiV1.routes,
-    ],
-
-    webSocketRoutes: [
-      // ── Chat rooms ──────────────────────────────────────────
-      //
-      // Connect via: ws://localhost:<PORT>/ws/chat/<roomId>
-      //
-      // Supported messages:
-      //   {"name": "Alice"}   → sets display name
-      //   "hello world"       → broadcasts as plain chat message
-      //   {"text": "..."}     → broadcasts as structured JSON message
-      //
-      // Events sent by server:
-      //   welcome, user_joined, user_left, user_renamed, message
-      WebSocketRoute(
-        path: '/ws/chat/:roomId',
-        onStart: chatOnStart,
-        onMessage: chatOnMessage,
-        onClose: chatOnClose,
-        onError: chatOnError,
-      ),
-
-      // ── Ping / echo ─────────────────────────────────────────
-      //
-      // Connect via: ws://localhost:<PORT>/ws/ping
-      // Send any message → receive {"event":"pong","echo":...,"ts":...}
-      WebSocketRoute(
-        path: '/ws/ping',
-        onMessage: pingOnMessage,
-      ),
-    ],
-
-    // Enable the built-in Swagger UI explorer.
-    // Visit http://localhost:<PORT>/quadrant_docs
-    docs: true,
-    docsLocalOnly: false, // Set to true in production
-    onError: (error, req) {
-      // Centralised error handler.
-      // Log the real error server-side, return a safe message to the client.
-      // ignore: avoid_print
-      print('[ERROR] ${req.method} ${req.path} — $error');
-      return Response.internalServerError('Something went wrong');
-    },
+  final cluster = await QuadrantCluster.start(
+    isolates: config.isolates,
+    port: config.port,
+    address: config.address,
+    build: _builderFor(config),
+    onIsolateExit: _onIsolateExit,
   );
 
-  // ─── Start ───────────────────────────────────────────────────
+  _closeOnSignal(cluster);
+  _printSummary(config, cluster);
+}
 
-  await app.listen(port: port);
+// `build` is sent to every isolate, along with all the variables of the scope
+// that created it. It has a function of its own so that it cannot carry
+// something like the cluster, which would make every start fail.
+QuadrantServer Function() _builderFor(Config config) =>
+    () => buildServer(config);
 
-  // ignore: avoid_print
+void _onIsolateExit(int index, {required bool willRestart}) {
+  if (willRestart) return;
+  // It keeps failing, so let the process supervisor start everything afresh.
+  stderr.writeln('Isolate $index keeps failing. Exiting.');
+  exit(1);
+}
+
+/// Finishes in-flight requests on `systemctl stop`, `docker stop` or Ctrl+C.
+/// A second signal stops at once.
+void _closeOnSignal(QuadrantCluster cluster) {
+  var closing = false;
+
+  Future<void> onSignal(ProcessSignal signal) async {
+    if (closing) exit(1);
+    closing = true;
+    print('$signal received, shutting down.');
+    await cluster.close(timeout: _drainTimeout);
+    exit(0);
+  }
+
+  ProcessSignal.sigint.watch().listen(onSignal);
+  if (!Platform.isWindows) ProcessSignal.sigterm.watch().listen(onSignal);
+}
+
+/// Used as the Docker health check, as the image has no curl. Returns the exit
+/// code: 0 if the server answers.
+Future<int> _healthCheck(int port) async {
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+  try {
+    final request = await client.get('127.0.0.1', port, '/health');
+    final response =
+        await request.close().timeout(const Duration(seconds: 3));
+    await response.drain<void>();
+    return response.statusCode == 200 ? 0 : 1;
+  } catch (error) {
+    stderr.writeln('Health check failed: $error');
+    return 1;
+  } finally {
+    client.close(force: true);
+  }
+}
+
+void _printSummary(Config config, QuadrantCluster cluster) {
+  print('Listening on ${config.address}:${cluster.port} '
+      'with ${config.isolates} isolate(s), '
+      '${config.production ? 'production' : 'development'} mode.');
+  print('Data directory: ${config.dataDir}');
+  if (config.production) return;
   print('');
-  // ignore: avoid_print
-  print('REST:');
-  // ignore: avoid_print
-  print('  GET    http://localhost:$port/health');
-  // ignore: avoid_print
-  print('  GET    http://localhost:$port/api/v1/users');
-  // ignore: avoid_print
-  print('  POST   http://localhost:$port/api/v1/users');
-  // ignore: avoid_print
-  print('  GET    http://localhost:$port/api/v1/users/:id');
-  // ignore: avoid_print
-  print('  PUT    http://localhost:$port/api/v1/users/:id');
-  // ignore: avoid_print
-  print('  PATCH  http://localhost:$port/api/v1/users/:id');
-  // ignore: avoid_print
-  print('  DELETE http://localhost:$port/api/v1/users/:id');
-  // ignore: avoid_print
-  print('  POST   http://localhost:$port/api/v1/echo');
-  // ignore: avoid_print
-  print('');
-  // ignore: avoid_print
-  print('WebSocket:');
-  // ignore: avoid_print
-  print('  ws://localhost:$port/ws/chat/<roomId>');
-  // ignore: avoid_print
-  print('  ws://localhost:$port/ws/ping');
-  // ignore: avoid_print
-  print('');
-  // ignore: avoid_print
-  print('Auth tokens for protected routes:');
-  // ignore: avoid_print
-  print('  Bearer secret-admin-token  (admin)');
-  // ignore: avoid_print
-  print('  Bearer secret-user-token   (user)');
-  // ignore: avoid_print
-  print('');
+  print('Docs:      http://localhost:${cluster.port}/quadrant_docs');
+  print('Demo tokens, which production refuses:');
+  Config.demoTokens.forEach((token, role) => print('  $token ($role)'));
 }

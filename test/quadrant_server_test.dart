@@ -1228,6 +1228,50 @@ void main() {
 
   // ─── Health check endpoint ───────────────────────────────────
 
+  group('Field.string() checks the type', () {
+    final schema = BodySchema({
+      'name': Field.string().required(),
+      'nickname': Field.string().maxLength(10),
+      'address': Field.object({'city': Field.string()}),
+      'tags': Field.list().of(Field.string()),
+    });
+
+    Future<Response> run(Map<String, dynamic> body) => validate(schema)(
+          _FakeRequest(body: body),
+          () async => Response.ok('ok'),
+        );
+
+    for (final wrong in <Object>[42, 1.5, true, ['a'], {'a': 1}]) {
+      test('refuses ${wrong.runtimeType} for a required field', () async {
+        final res = await run({'name': wrong});
+        expect(res.statusCode, 422);
+        expect(res.body, contains('name must be a string'));
+      });
+    }
+
+    test('refuses it for an optional field too', () async {
+      final res = await run({'name': 'ok', 'nickname': 42});
+      expect(res.statusCode, 422);
+      expect(res.body, contains('nickname must be a string'));
+    });
+
+    test('refuses it inside objects and lists', () async {
+      final res = await run({
+        'name': 'ok',
+        'address': {'city': 42},
+        'tags': ['fine', 7],
+      });
+      expect(res.statusCode, 422);
+      expect(res.body, contains('address.city must be a string'));
+      expect(res.body, contains('tags[1] must be a string'));
+    });
+
+    test('a missing optional field is still fine', () async {
+      final res = await run({'name': 'ok'});
+      expect(res.statusCode, 200);
+    });
+  });
+
   group('Nested validation', () {
     final schema = BodySchema({
       'age': Field.int_().required(),

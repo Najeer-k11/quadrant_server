@@ -570,6 +570,8 @@ For the best performance, deploy a compiled build (`dart compile exe`) rather th
 
 ## Running in production
 
+For a complete app with step-by-step instructions for a VPS, including systemd, nginx and HTTPS, see [`example/DEPLOY.md`](example/DEPLOY.md).
+
 ### HTTPS
 
 ```dart

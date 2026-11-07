@@ -1,142 +1,127 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:quadrant_server/quadrant_server.dart';
 
-// ─── Chat room registry ───────────────────────────────────────
+const _maxMessageLength = 4096;
+const _maxNameLength = 32;
 
-/// One [WebSocketGroup] per room ID.
-/// Rooms are created on first join and removed when the last user leaves.
+final _validRoom = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
+final _random = Random();
+
+// ─── Rooms ────────────────────────────────────────────────────
+
+/// This isolate's members of each room, removed when the last one leaves.
+///
+/// A name makes groups with the same name on different isolates act as one, so
+/// a broadcast reaches the whole room. `length` only counts this isolate, so
+/// this app does not report how many people are online.
 final Map<String, WebSocketGroup> _rooms = {};
 
 WebSocketGroup _room(String id) =>
-    _rooms.putIfAbsent(id, () => WebSocketGroup());
+    _rooms.putIfAbsent(id, () => WebSocketGroup(name: 'room:$id'));
 
-// ─── Presence tracker ─────────────────────────────────────────
-
-/// Maps WebSocketContext → display name (set on first message).
 final Map<WebSocketContext, String> _names = {};
 
-String _nameOf(WebSocketContext ctx) =>
-    _names[ctx] ?? 'User#${ctx.hashCode.toRadixString(16).substring(0, 4)}';
+String _roomId(WebSocketContext ctx) => ctx.request.params['roomId']!;
 
-// ─── Chat route callbacks ─────────────────────────────────────
+/// Runs before the upgrade, so a bad name never becomes a connection.
+Middleware validRoomId() => (Request req, Next next) async {
+      if (!_validRoom.hasMatch(req.params['roomId'] ?? '')) {
+        return Response.badRequest(
+            'A room ID has 1 to 64 letters, digits, "-" or "_"');
+      }
+      return next();
+    };
 
-/// Called once immediately after the WebSocket upgrade.
-///
-/// Sends a welcome payload and broadcasts a "joined" event to the room.
+// ─── Chat callbacks ───────────────────────────────────────────
+
 Future<void> chatOnStart(WebSocketContext ctx) async {
-  final roomId = ctx.request.params['roomId'] ?? 'general';
+  final roomId = _roomId(ctx);
+  final name =
+      'Guest-${_random.nextInt(0x10000).toRadixString(16).padLeft(4, '0')}';
+  _names[ctx] = name;
   _room(roomId).add(ctx);
 
-  // Welcome the new connection with room metadata.
   ctx.sendJson({
     'event': 'welcome',
     'room': roomId,
-    'online': _room(roomId).length,
+    'name': name,
     'hint': 'Send {"name":"YourName"} to set your display name.',
   });
-
-  // Announce to everyone else already in the room.
   _room(roomId).broadcastJson(
-    {
-      'event': 'user_joined',
-      'room': roomId,
-      'online': _room(roomId).length,
-    },
+    {'event': 'user_joined', 'room': roomId, 'name': name},
     exclude: ctx,
   );
 }
 
-/// Called for every incoming message frame.
-///
-/// Supports two message formats:
-///   1. JSON `{"name": "Alice"}` — sets the sender's display name.
-///   2. Anything else — broadcast as a chat message to the whole room.
+/// Accepts `{"name": "Alice"}` to set a display name, and treats any other text
+/// as a chat message.
 Future<void> chatOnMessage(WebSocketContext ctx, dynamic data) async {
-  final roomId = ctx.request.params['roomId'] ?? 'general';
-
-  // Try to parse JSON control messages.
-  if (data is String) {
-    try {
-      final json = jsonDecode(data) as Map<String, dynamic>;
-
-      // Name-setting control message.
-      if (json.containsKey('name')) {
-        final name = (json['name'] as String).trim();
-        if (name.isNotEmpty) {
-          _names[ctx] = name;
-          ctx.sendJson({'event': 'name_set', 'name': name});
-          _room(roomId).broadcastJson(
-            {'event': 'user_renamed', 'name': name},
-            exclude: ctx,
-          );
-          return;
-        }
-      }
-
-      // Regular JSON chat message — broadcast with sender info.
-      _room(roomId).broadcastJson({
-        'event': 'message',
-        'from': _nameOf(ctx),
-        'data': json,
-      }, exclude: ctx);
-      return;
-    } catch (_) {
-      // Not JSON — treat as plain text chat message.
-    }
+  if (data is! String) {
+    ctx.sendJson({'event': 'error', 'message': 'Only text is accepted'});
+    return;
+  }
+  if (data.length > _maxMessageLength) {
+    ctx.sendJson({'event': 'error', 'message': 'That message is too long'});
+    return;
   }
 
-  // Plain text or binary broadcast.
-  _room(roomId).broadcastJson({
-    'event': 'message',
-    'from': _nameOf(ctx),
-    'data': data,
-  }, exclude: ctx);
+  final room = _room(_roomId(ctx));
+  final json = _tryDecodeObject(data);
+  final newName = json?['name'];
+
+  if (newName is String && newName.trim().isNotEmpty) {
+    final name = newName.trim();
+    if (name.length > _maxNameLength) {
+      ctx.sendJson({'event': 'error', 'message': 'That name is too long'});
+      return;
+    }
+    final oldName = _names[ctx];
+    _names[ctx] = name;
+    ctx.sendJson({'event': 'name_set', 'name': name});
+    room.broadcastJson(
+      {'event': 'user_renamed', 'from': oldName, 'name': name},
+      exclude: ctx,
+    );
+    return;
+  }
+
+  room.broadcastJson(
+    {'event': 'message', 'from': _names[ctx], 'data': json ?? data},
+    exclude: ctx,
+  );
 }
 
-/// Called when the connection closes.
-///
-/// Removes the client from the room, broadcasts a "left" event,
-/// and cleans up empty rooms.
-Future<void> chatOnClose(
-  WebSocketContext ctx,
-  int? code,
-  String? reason,
-) async {
-  final roomId = ctx.request.params['roomId'] ?? 'general';
-  final name = _nameOf(ctx);
-
-  _room(roomId).remove(ctx);
-  _names.remove(ctx);
-
-  _room(roomId).broadcastJson({
-    'event': 'user_left',
-    'name': name,
-    'online': _room(roomId).length,
-  });
-
-  // Clean up empty rooms to prevent memory leaks.
-  if (_room(roomId).isEmpty) _rooms.remove(roomId);
-
-  // ignore: avoid_print
-  print('[WS] "$name" left room "$roomId" — code: $code, reason: $reason');
+Future<void> chatOnClose(WebSocketContext ctx, int? code, String? reason) async {
+  final roomId = _roomId(ctx);
+  final name = _names.remove(ctx);
+  final room = _room(roomId)..remove(ctx);
+  room.broadcastJson({'event': 'user_left', 'name': name});
+  if (room.isEmpty) _rooms.remove(roomId);
 }
 
-/// Called when a stream error occurs on the connection.
 Future<void> chatOnError(WebSocketContext ctx, Object error) async {
   // ignore: avoid_print
-  print('[WS] Error for ${_nameOf(ctx)}: $error');
+  print('[WS] Error for ${_names[ctx]}: $error');
 }
 
-// ─── Ping / echo route callbacks ─────────────────────────────
+Map<String, dynamic>? _tryDecodeObject(String text) {
+  try {
+    final decoded = jsonDecode(text);
+    return decoded is Map<String, dynamic> ? decoded : null;
+  } on FormatException {
+    return null;
+  }
+}
 
-/// Simple ping–pong echo WebSocket — useful for connection health checks.
-///
-/// Any message received is echoed back with a timestamp.
+// ─── Ping ─────────────────────────────────────────────────────
+
+/// Echoes each message with a timestamp, to test that a connection works.
 Future<void> pingOnMessage(WebSocketContext ctx, dynamic data) async {
   ctx.sendJson({
     'event': 'pong',
-    'echo': data,
+    'echo': data is String ? data : '(binary)',
     'ts': DateTime.now().millisecondsSinceEpoch,
   });
 }
