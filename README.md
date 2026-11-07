@@ -23,10 +23,10 @@ final app = QuadrantServer(
 | Area | Features |
 |---|---|
 | **Routing** | Path params, wildcards, route groups, automatic `404`, `405` and `HEAD` |
-| **Middleware** | 15 built in: security headers, CORS, auth, rate limiting, body parsing, uploads, compression, caching and more |
+| **Middleware** | 15 built in: security headers, CORS, auth, rate limiting, body parsing, streaming uploads, compression, caching and more |
 | **Real-time** | WebSockets with rooms and heartbeats, Server-Sent Events |
 | **Validation** | Schemas with nested objects, typed values and field-level errors |
-| **Multi-core** | One server per isolate on a single port, with rate limits and broadcasts shared between them |
+| **Multi-core** | One server per isolate on a single port, with rate limits and broadcasts shared between them, and restarts for isolates that die |
 | **Operations** | TLS, graceful shutdown, health check, generated Swagger UI docs, streaming responses |
 
 ## Contents
@@ -225,7 +225,7 @@ Global middleware also runs for requests that match no route, so `404` and `405`
 | `ipFilter()` | Allows or denies exact IPs and CIDR ranges | `allow` or `deny`, `onDeny`, `trustedProxyHops` |
 | `bodyParser()` | Parses JSON into `req.body`; `400` if invalid, `413` if too large | `maxBodyBytes` (1 MB) |
 | `formParser()` | Parses URL-encoded forms into `req.body` | `maxBodyBytes` (64 KB) |
-| `multipartParser()` | Parses uploads into `req.context['files']` and `['fields']` | `maxFileSize` (10 MB), `maxTotalBytes` (50 MB) |
+| `multipartParser()` | Parses uploads into `req.context['files']` and `['fields']` | `maxFileSize` (10 MB), `maxTotalBytes` (50 MB), `diskThreshold`, `maxBufferedBytes` (256 MB), `maxParts` (1,000), `maxFieldBytes` (10 MB) |
 | `cookieParser()` | Parses cookies into `req.context['cookies']` | `contextKey` |
 | `compress()` | Gzips responses for clients that accept it | `minBytes` (512 B) |
 | `etag()` | Adds weak ETags and answers `304 Not Modified` | None |
@@ -311,7 +311,7 @@ Route.post(
     for (final file in files) {
       // file.filename comes from the client. Never use it as a path.
       final savedName = '${DateTime.now().microsecondsSinceEpoch}.bin';
-      await File('uploads/$savedName').writeAsBytes(file.bytes);
+      await file.moveTo('uploads/$savedName');
     }
 
     return Response.ok({'uploaded': files.length, 'fields': fields.length});
@@ -319,7 +319,27 @@ Route.post(
 )
 ```
 
-Uploads are held in memory until the handler finishes, so set limits that suit your server.
+Uploads are parsed as they arrive, so one that breaks a limit is rejected straight away. By default, files are held in memory until the handler finishes, and past `maxBufferedBytes` on an isolate, new uploads get a `503`.
+
+**For big files or many uploads at once**, set `diskThreshold`. Files bigger than that go to a temporary file instead of memory:
+
+```dart
+multipartParser(
+  maxFileSize: 500 * 1024 * 1024,
+  maxTotalBytes: 500 * 1024 * 1024,
+  diskThreshold: 1024 * 1024,
+)
+```
+
+| On an `UploadedFile` | |
+|---|---|
+| `moveTo(path)` | Saves it. Use this to keep a temporary file, because it is deleted once the response is ready. |
+| `openRead()`, `readAsBytes()` | Read it, wherever it is. |
+| `bytes` | Only for a file in memory. It throws for a file on disk, so check `isInMemory` or use the others. |
+
+Finish reading before the handler returns, and do not return a `StreamResponse` that reads from `openRead()`.
+
+`maxTotalBytes` limits one request, so many uploads together can still fill the disk: give `tempDirectory` somewhere with a limit, if that matters. If the process is killed, temporary files stay behind in `quadrant_upload_*` directories, so clear those when it starts.
 
 ---
 
@@ -605,7 +625,8 @@ Without `onError`, an exception in a handler gives a `500` with a generic messag
 - `listen()` binds to all network interfaces. To accept local connections only, such as behind a proxy on the same machine, pass `address: InternetAddress.loopbackIPv4`.
 - Replace the `cors()` default of `origin: '*'` with your real origin.
 - Set `trustedProxyHops` on `rateLimit()` and `ipFilter()` if you run behind a proxy.
-- Check that `bodyParser()` and `multipartParser()` limits suit your app.
+- Check that `bodyParser()` and `multipartParser()` limits suit your app, and set `diskThreshold` if you accept big files.
+- Run under a process supervisor such as systemd or Docker, and set timeouts on your clients or proxy. In a cluster, consider `onIsolateExit`.
 
 ---
 
@@ -614,7 +635,7 @@ Without `onError`, an exception in a handler gives a `500` with a generic messag
 - **A stuck cluster isolate is not detected.** One in an endless loop has not died, so it is not replaced, and requests it has accepted wait.
 - **Connections on a cluster isolate that dies stay open until the next garbage collection.** Those clients may wait until their own timeout.
 - **`rateLimit()` keeps its counts in memory.** They reset on restart and are not shared between processes or machines.
-- **Uploads and JSON bodies are held in memory** until the request finishes.
+- **JSON and form bodies are held in memory** until the request finishes, up to their `maxBodyBytes`. So are uploads, unless you set `diskThreshold`.
 
 ---
 

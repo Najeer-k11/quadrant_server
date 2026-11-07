@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import '../core/middleware.dart';
 import '../core/request.dart';
 import '../core/response.dart';
+import '../utils/request_body.dart';
 import 'body_parser.dart';
 
 /// Form body parser middleware.
@@ -42,18 +43,19 @@ Middleware formParser({int maxBodyBytes = 65536}) {
     }
 
     try {
+      // Reject early when the client already declares a body that is too big.
+      if (maxBodyBytes > 0 && req.raw.contentLength > maxBodyBytes) {
+        abandonBody(req.raw);
+        return _tooLarge(maxBodyBytes);
+      }
+
       // Stream bytes with limit.
       // BytesBuilder stores 1 byte per byte; a List<int> would use 8.
       final bodyBytes = BytesBuilder(copy: false);
-      await for (final chunk in req.raw) {
+      await for (final chunk in readBody(req.raw)) {
         bodyBytes.add(chunk);
         if (maxBodyBytes > 0 && bodyBytes.length > maxBodyBytes) {
-
-          return Response(
-            statusCode: 413,
-            headers: {'content-type': 'application/json'},
-            body: '{"error":"Payload Too Large","maxBytes":$maxBodyBytes}',
-          );
+          return _tooLarge(maxBodyBytes);
         }
       }
 
@@ -71,3 +73,9 @@ Middleware formParser({int maxBodyBytes = 65536}) {
     return next();
   };
 }
+
+Response _tooLarge(int maxBodyBytes) => Response(
+      statusCode: 413,
+      headers: {'content-type': 'application/json'},
+      body: '{"error":"Payload Too Large","maxBytes":$maxBodyBytes}',
+    );

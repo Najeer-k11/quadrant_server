@@ -31,7 +31,8 @@ export 'src/middlewares/form_parser.dart';
 export 'src/middlewares/helmet.dart';
 export 'src/middlewares/ip_filter.dart';
 export 'src/middlewares/logger.dart';
-export 'src/middlewares/multipart_parser.dart' hide consumeMultipartContext;
+export 'src/middlewares/multipart_parser.dart'
+    hide consumeMultipartContext, MultipartFormatException, MultipartStreamParser;
 export 'src/middlewares/rate_limit.dart';
 export 'src/middlewares/request_id.dart' hide consumeRequestIdContext;
 export 'src/middlewares/static_files.dart' show staticFiles;

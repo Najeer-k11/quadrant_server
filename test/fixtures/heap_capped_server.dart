@@ -25,6 +25,25 @@ Future<void> main(List<String> args) async {
         handler: (req) async => Response.text(
             '${(req.context['files'] as List<UploadedFile>).single.size}'),
       ),
+      Route.post(
+        path: '/upload-to-disk',
+        middlewares: [
+          multipartParser(
+            maxFileSize: 1 << 30,
+            maxTotalBytes: 0,
+            diskThreshold: 1 << 20,
+            tempDirectory: Directory(args.single),
+          ),
+        ],
+        handler: (req) async {
+          final file = (req.context['files'] as List<UploadedFile>).single;
+          var total = 0;
+          await for (final chunk in file.openRead()) {
+            total += chunk.length;
+          }
+          return Response.text('$total');
+        },
+      ),
       Route.get(path: '/static/*', handler: staticFiles(args.single)),
     ],
   ).listen(port: 0, address: InternetAddress.loopbackIPv4);

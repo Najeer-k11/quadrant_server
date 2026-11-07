@@ -1581,6 +1581,44 @@ void main() {
     ];
 
     for (final (name, contentType, parser) in cases) {
+      // These never finish sending, so a 413 can only be one that did not wait
+      // for the rest of the body. dart:io would lose it or delay it if asked to
+      // stop reading in the usual way.
+      Future<String> responseToUnfinished(String headersAndStart) async {
+        final app = QuadrantServer(routes: [
+          Route.post(path: '/', handler: _ok, middlewares: [parser]),
+        ]);
+        final server = await app.listen(port: 0);
+        final socket = await Socket.connect(
+            InternetAddress.loopbackIPv4, server.port);
+        try {
+          socket.write('POST / HTTP/1.1\r\nHost: x\r\n'
+              'Content-Type: $contentType\r\n$headersAndStart');
+          await socket.flush();
+          return await latin1.decodeStream(socket).timeout(
+              const Duration(seconds: 5),
+              onTimeout: () => 'timed out');
+        } finally {
+          socket.destroy();
+          await app.close(force: true);
+        }
+      }
+
+      test('$name answers 413 for a declared size without reading it',
+          () async {
+        final response =
+            await responseToUnfinished('Content-Length: 1073741824\r\n\r\n');
+        expect(response, startsWith('HTTP/1.1 413'));
+        expect(response.toLowerCase(), contains('connection: close'));
+      });
+
+      test('$name answers 413 while the rest of the body is on its way',
+          () async {
+        final response = await responseToUnfinished(
+            'Transfer-Encoding: chunked\r\n\r\n40\r\n${'x' * 64}\r\n');
+        expect(response, startsWith('HTTP/1.1 413'));
+      });
+
       test('$name returns 413 once the body passes the limit', () async {
         final app = QuadrantServer(routes: [
           Route.post(path: '/', handler: _ok, middlewares: [parser]),
@@ -1751,6 +1789,19 @@ void main() {
       expect(
         await post('/upload', 'multipart/form-data; boundary=b', parts),
         '200 ${8 * mb}',
+      );
+    });
+
+    test('multipartParser(diskThreshold:) takes a 200 MB file', () async {
+      final parts = [
+        utf8.encode('--b\r\nContent-Disposition: form-data; name="f"; '
+            'filename="a.bin"\r\n\r\n'),
+        for (var i = 0; i < 25; i++) Uint8List(8 * mb),
+        utf8.encode('\r\n--b--\r\n'),
+      ];
+      expect(
+        await post('/upload-to-disk', 'multipart/form-data; boundary=b', parts),
+        '200 ${200 * mb}',
       );
     });
 
