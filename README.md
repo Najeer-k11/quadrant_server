@@ -221,7 +221,7 @@ Global middleware also runs for requests that match no route, so `404` and `405`
 | `requestId()` | Reuses or generates an ID, in `req.context['requestId']` and the response | `headerName`, `contextKey` |
 | `logger()` | Logs method, path, status and time | `output` |
 | `bearerAuth()` | Checks `Authorization: Bearer`; puts the result in `req.context['user']` | `validate`, `contextKey`, `realm` |
-| `rateLimit()` | Sliding-window limit per IP or custom key | `maxRequests`, `window`, `keyExtractor`, `trustedProxyHops` |
+| `rateLimit()` | Sliding-window limit per IP or custom key | `maxRequests`, `window`, `keyExtractor`, `trustedProxyHops`, `maxKeys` (100,000) |
 | `ipFilter()` | Allows or denies exact IPs and CIDR ranges | `allow` or `deny`, `onDeny`, `trustedProxyHops` |
 | `bodyParser()` | Parses JSON into `req.body`; `400` if invalid, `413` if too large | `maxBodyBytes` (1 MB) |
 | `formParser()` | Parses URL-encoded forms into `req.body` | `maxBodyBytes` (64 KB) |
@@ -287,6 +287,8 @@ Route.post(
 ```
 
 Responses carry `X-RateLimit-*` headers, and a rejected request gets a `429` with `Retry-After`.
+
+IPv6 clients are grouped by /64, because one client usually controls that whole range. At most `maxKeys` clients are tracked at once, so a flood of new keys cannot use up memory: past it, idle clients are forgotten first and then the oldest ones, whose counts start again.
 
 **Behind a proxy**, every request appears to come from the proxy's IP, so all your clients would share one limit. Tell `rateLimit()` how many proxies you run, and it reads the client IP from the entries they appended to `X-Forwarded-For`:
 
@@ -499,13 +501,35 @@ Isolates do not share memory, so a variable in your code exists once per isolate
 
 | | Across isolates |
 |---|---|
-| `rateLimit()` | One count. Each limited request makes one round trip to the main isolate. `build` must create limiters in the same order every time. |
+| `rateLimit()` | One count. Each limited request makes one round trip to the main isolate. `build` must create limiters in the same order every time. If the main isolate does not answer within 250 ms, the isolate counts on its own until it does, and prints a warning. |
 | `WebSocketGroup(name: 'room:42')` | `broadcast()`, `broadcastJson()` and `closeAll()` reach every isolate. `length`, `isEmpty` and `members` cover the current one only. |
 | `WebSocketGroup()` | Throws when you add a member, because it would silently miss clients. Use `WebSocketGroup.local()` if you mean to stay on one isolate. |
 | Health check | Reports the total requests of all isolates, plus an `isolates` count. |
 | **Your own variables** | **Not shared.** Keep caches, sessions and similar state in a database or external store. |
 
-An isolate that dies is reported but not restarted. Nothing is shared with other processes or machines, so if you run several, rate limits apply to each one separately.
+Nothing is shared with other processes or machines, so if you run several, rate limits apply to each one separately.
+
+### When an isolate dies
+
+It is replaced with a new one from `build`. The wait starts at `restartDelay` (1 second) and doubles with each failure in a row, up to 30 seconds. After `maxRestarts` (10) failures in a row, it is given up on and the others keep serving. The count starts again once an isolate has run for a minute, and `maxRestarts: 0` turns restarting off.
+
+```dart
+final cluster = await QuadrantCluster.start(
+  isolates: Platform.numberOfProcessors,
+  port: 3000,
+  build: buildServer,
+  onIsolateExit: (index, {required willRestart}) {
+    // Let your process supervisor take over.
+    if (!willRestart) exit(1);
+  },
+);
+```
+
+New connections go to the isolates that are alive, and the replacement takes its share as soon as it is listening. Its share of the health check's request total starts again from 0. `rateLimit()` counts are kept, because they live on the main isolate. `cluster.runningIsolates` tells you how many are listening.
+
+Sockets the dead isolate had **stay open until the Dart VM next collects garbage**, which can take a while on a quiet server. Until then its clients get no error, so set a timeout on your clients or proxy. If you `close()` the cluster and bind its port again in the same process, that can fail for the same reason; a process that exits releases everything.
+
+Restarting does not replace a process supervisor. A crash of the Dart VM ends every isolate, so run under systemd, Docker or similar.
 
 ### Performance
 
@@ -587,7 +611,8 @@ Without `onError`, an exception in a handler gives a `500` with a generic messag
 
 ## Known limitations
 
-- **A cluster isolate that dies is not restarted.** It is reported, and the others keep serving.
+- **A stuck cluster isolate is not detected.** One in an endless loop has not died, so it is not replaced, and requests it has accepted wait.
+- **Connections on a cluster isolate that dies stay open until the next garbage collection.** Those clients may wait until their own timeout.
 - **`rateLimit()` keeps its counts in memory.** They reset on restart and are not shared between processes or machines.
 - **Uploads and JSON bodies are held in memory** until the request finishes.
 

@@ -2,10 +2,14 @@
 
 ### Security
 
+- **`rateLimit()` could be bypassed over IPv6** — Each address had its own count, and a single client usually controls a whole /64. IPv6 clients are now grouped by /64, and IPv4-mapped addresses count as the IPv4 address they carry. This only affects the default key, not a `keyExtractor`.
+- **`rateLimit()` could use unlimited memory** — A flood of distinct keys all stayed in memory until the window passed. See `maxKeys` below.
 - **The streaming example in the README and in the `StreamResponse` docs allowed path traversal** — It built a file path from `req.params`, and params are URL-decoded, so `/download/..%2Fsecret.txt` could read files outside the intended directory. The examples are fixed. **If you copied that example, check your code**: use `staticFiles()` for files chosen by the client.
 
 ### Added
 
+- **`QuadrantCluster` restarts isolates that die** — With a growing delay, and giving up after `maxRestarts` failures in a row. Adds `maxRestarts`, `restartDelay`, `onIsolateExit` and `runningIsolates`.
+- **`rateLimit(maxKeys:)`** — The most clients tracked at once. Defaults to 100,000.
 - **`QuadrantCluster`** — Runs one server per isolate on the same port. In the included benchmark, a typical middleware stack went from about 45,000 to 121,000 requests per second on 8 isolates, and handlers with 1 ms of CPU work scaled 7.5x. See the README for what is and is not shared between isolates.
 - **`WebSocketGroup(name:)` and `WebSocketGroup.local()`** — Named groups broadcast across the isolates of a cluster. Outside a cluster nothing changes, and existing `WebSocketGroup()` calls still work.
 - **`Field.object()` and `ListField.of()`** — Nested validation, with errors keyed by path such as `address.city` and `scores[2]`.
@@ -22,6 +26,9 @@
 
 ### Fixed
 
+- **`multipartParser()` turned handler errors into `400`s** — An exception from anything after it, including the handler, returned `400 Invalid multipart body` and skipped `onError`. It now reaches the usual error handling.
+- **`multipartParser()` accepted truncated uploads** — A body without its closing delimiter reached the handler as if complete, with a cut-off last file. It now gets a `400`. **Check this if a client of yours omits the closing delimiter.**
+- **A blocked main isolate could hang a cluster** — Rate-limited requests and health checks waited for it forever. They now continue without it after a short wait.
 - **`cors()` preflight did not work** — A real `OPTIONS` request got a `405` before any middleware ran, so browsers blocked cross-origin requests that need a preflight, such as JSON `POST`s. It now gets a `204`, with `cors()` used globally, on a route, or on a `QuadrantRouter`. Route auth does not run on these requests, because browsers send no credentials with a preflight.
 - **Non-ASCII responses were corrupted or empty** — `Response.ok()`, `validate()` and any response without a charset in its `content-type` were encoded as Latin-1. A name like `Zoë` arrived as invalid UTF-8, and text outside Latin-1, such as `日本語` or the `≥` in `validate()`'s own error messages, produced an empty body with no error. These responses are now UTF-8, and an explicit charset is still respected.
 - **A stream that fails to start hung the request** — A `StreamResponse` whose stream was already in use left the request, and so `close()`, waiting forever. The connection is now dropped.

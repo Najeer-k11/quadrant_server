@@ -582,6 +582,110 @@ void main() {
       });
     });
 
+    group('IPv6 clients', () {
+      Future<int> statusOf(Middleware mw, String socketIp,
+          [String? forwarded]) async {
+        final res = await mw(
+          _FakeRequest(
+            headers: {if (forwarded != null) 'x-forwarded-for': forwarded},
+            rawRequest: _FakeHttpRequestWithIp(InternetAddress(socketIp)),
+          ),
+          () async => Response.ok('ok'),
+        );
+        return res.statusCode;
+      }
+
+      Middleware limiter([int hops = 0]) => rateLimit(
+            maxRequests: 1,
+            window: const Duration(minutes: 1),
+            trustedProxyHops: hops,
+          );
+
+      test('addresses in one /64 share a limit', () async {
+        final mw = limiter();
+        expect(await statusOf(mw, '2001:db8:1:2::a'), 200);
+        expect(await statusOf(mw, '2001:db8:1:2:ffff:ffff:ffff:b'), 429);
+      });
+
+      test('different /64s get separate limits', () async {
+        final mw = limiter();
+        expect(await statusOf(mw, '2001:db8:1:2::a'), 200);
+        expect(await statusOf(mw, '2001:db8:1:3::a'), 200);
+      });
+
+      test('grouping also applies to X-Forwarded-For', () async {
+        final mw = limiter(1);
+        expect(await statusOf(mw, '10.0.0.1', '2001:db8:1:2::a'), 200);
+        expect(await statusOf(mw, '10.0.0.1', '2001:DB8:1:2:0:0:0:b'), 429);
+      });
+
+      test('an IPv4-mapped address counts as that IPv4 address', () async {
+        final mw = limiter(1);
+        expect(await statusOf(mw, '10.0.0.1', '1.1.1.1'), 200);
+        expect(await statusOf(mw, '10.0.0.1', '::ffff:1.1.1.1'), 429);
+      });
+
+      test('an entry that is not an address is still a usable key', () async {
+        final mw = limiter(1);
+        expect(await statusOf(mw, '10.0.0.1', 'not:an:address'), 200);
+        expect(await statusOf(mw, '10.0.0.1', 'not:an:address'), 429);
+      });
+    });
+
+    group('maxKeys', () {
+      Future<int> statusOf(Middleware mw, String key) async {
+        final res = await mw(
+          _FakeRequest(headers: {'x-api-key': key}),
+          () async => Response.ok('ok'),
+        );
+        return res.statusCode;
+      }
+
+      Middleware limiter(int maxKeys) => rateLimit(
+            maxRequests: 1,
+            window: const Duration(minutes: 1),
+            keyExtractor: (req) => req.headers['x-api-key']!,
+            maxKeys: maxKeys,
+          );
+
+      test('the oldest client is forgotten past the limit', () async {
+        final mw = limiter(2);
+        expect(await statusOf(mw, 'a'), 200);
+        expect(await statusOf(mw, 'b'), 200);
+        expect(await statusOf(mw, 'a'), 429);
+        expect(await statusOf(mw, 'c'), 200); // forgets a
+        expect(await statusOf(mw, 'a'), 200); // forgets b
+        expect(await statusOf(mw, 'c'), 429);
+      });
+
+      test('clients within the limit keep their counts', () async {
+        final mw = limiter(100);
+        for (var i = 0; i < 100; i++) {
+          expect(await statusOf(mw, 'client-$i'), 200);
+        }
+        for (var i = 0; i < 100; i++) {
+          expect(await statusOf(mw, 'client-$i'), 429);
+        }
+      });
+
+      test('a flood frees room in batches and stays within the limit', () async {
+        final mw = limiter(100);
+        for (var i = 0; i < 1000; i++) {
+          expect(await statusOf(mw, 'client-$i'), 200);
+        }
+        // The newest 90 survive the last batch at minimum.
+        for (var i = 910; i < 1000; i++) {
+          expect(await statusOf(mw, 'client-$i'), 429);
+        }
+        // And the first was forgotten long ago.
+        expect(await statusOf(mw, 'client-0'), 200);
+      });
+
+      test('rejects a value below 1', () {
+        expect(() => limiter(0), throwsArgumentError);
+      });
+    });
+
     test('custom keyExtractor is used for bucketing', () async {
       final mw = rateLimit(
         maxRequests: 1,
@@ -1500,6 +1604,89 @@ void main() {
   });
 
   // ─── Memory: big bodies and files ────────────────────────────
+
+  group('multipartParser correctness', () {
+    late HttpServer server;
+    late HttpClient client;
+    Object? seenByOnError;
+
+    setUp(() async {
+      seenByOnError = null;
+      server = await QuadrantServer(
+        onError: (error, req) {
+          seenByOnError = error;
+          return Response.internalServerError('handled');
+        },
+        routes: [
+          Route.post(
+            path: '/upload',
+            middlewares: [multipartParser()],
+            handler: (req) async {
+              final files = req.context['files'] as List<UploadedFile>;
+              final fields = req.context['fields'] as Map<String, String>;
+              return Response.ok({
+                'files': [for (final f in files) utf8.decode(f.bytes)],
+                'fields': fields,
+              });
+            },
+          ),
+          Route.post(
+            path: '/throws',
+            middlewares: [multipartParser()],
+            handler: (req) async => throw StateError('database is down'),
+          ),
+        ],
+      ).listen(port: 0, address: InternetAddress.loopbackIPv4);
+      client = HttpClient();
+    });
+
+    tearDown(() async {
+      client.close(force: true);
+      await server.close(force: true);
+    });
+
+    Future<(int, String)> post(String path, String body) async {
+      final req = await client.post('127.0.0.1', server.port, path);
+      req.headers.set('content-type', 'multipart/form-data; boundary=b');
+      req.write(body);
+      final res = await req.close();
+      return (res.statusCode, await res.transform(utf8.decoder).join());
+    }
+
+    const field = '--b\r\n'
+        'content-disposition: form-data; name="title"\r\n\r\n'
+        'hello\r\n';
+    const fileStart = '--b\r\n'
+        'content-disposition: form-data; name="f"; filename="a.txt"\r\n\r\n'
+        'contents';
+
+    test('a complete body reaches the handler', () async {
+      final (status, body) = await post('/upload', '$field$fileStart\r\n--b--\r\n');
+      expect(status, 200);
+      expect(jsonDecode(body), {
+        'files': ['contents'],
+        'fields': {'title': 'hello'},
+      });
+    });
+
+    test('an error in the handler reaches onError, not a 400', () async {
+      final (status, body) = await post('/throws', '$field--b--\r\n');
+      expect(status, 500);
+      expect(body, contains('handled'));
+      expect(seenByOnError, isA<StateError>());
+    });
+
+    test('a file cut off before its delimiter is rejected', () async {
+      final (status, _) = await post('/upload', '$field$fileStart');
+      expect(status, 400);
+    });
+
+    test('a body that stops at a delimiter without the end is rejected',
+        () async {
+      final (status, _) = await post('/upload', '$fileStart\r\n--b');
+      expect(status, 400);
+    });
+  });
 
   group('Big bodies and files fit in a 64 MB heap', () {
     // Bytes kept in a List<int> cost 8 bytes each plus room to grow, which

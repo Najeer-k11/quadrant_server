@@ -27,9 +27,10 @@ class RateCheck {
   final String limiter;
   final int maxRequests;
   final int windowMs;
+  final int maxKeys;
   final String key;
   const RateCheck(this.worker, this.callId, this.limiter, this.maxRequests,
-      this.windowMs, this.key);
+      this.windowMs, this.maxKeys, this.key);
 }
 
 class CountRequests {
@@ -96,12 +97,32 @@ class ShutdownWorker {
 /// This isolate's connection to the coordinator, or null outside a cluster.
 ClusterLink? currentClusterLink;
 
+/// How long a request waits for a rate-limit answer from the main isolate.
+/// A round trip normally takes well under a millisecond.
+const _rateCheckTimeoutMs = 250;
+
+/// How long a health check waits for the total. Longer than the coordinator's
+/// own wait for the other isolates, which it needs to give a useful answer.
+const _totalRequestsTimeoutMs = 1000;
+
+/// How often unanswered calls are checked for having timed out.
+const _expiryInterval = Duration(milliseconds: 50);
+
+class _PendingCall {
+  final Completer<Object?> completer = Completer<Object?>();
+  final int deadlineMs;
+  _PendingCall(this.deadlineMs);
+}
+
 /// A worker isolate's connection to the coordinator.
 class ClusterLink {
   final int index;
   final int isolateCount;
   final SendPort _hub;
-  final Map<int, Completer<Object>> _calls = {};
+  final Map<int, _PendingCall> _calls = {};
+  final Stopwatch _clock = Stopwatch()..start();
+  Timer? _expiryTimer;
+  bool _warnedUnresponsive = false;
   int _nextCallId = 0;
 
   int Function() requestCount = () => 0;
@@ -112,26 +133,67 @@ class ClusterLink {
 
   ClusterLink(this.index, this.isolateCount, this._hub);
 
-  Future<RateDecision> rateCheck(
+  /// Asks the coordinator for a decision. Returns null if it does not answer
+  /// in time, so that a blocked main isolate cannot hang requests.
+  Future<RateDecision?> rateCheck(
     String limiter,
     int maxRequests,
     int windowMs,
+    int maxKeys,
     String key,
   ) async {
-    final completer = Completer<Object>();
-    final callId = _nextCallId++;
-    _calls[callId] = completer;
-    _hub.send(RateCheck(index, callId, limiter, maxRequests, windowMs, key));
-    return await completer.future as RateDecision;
+    final reply = await _call(
+      _rateCheckTimeoutMs,
+      (callId) => RateCheck(
+          index, callId, limiter, maxRequests, windowMs, maxKeys, key),
+    );
+    return reply as RateDecision?;
   }
 
-  /// The number of requests handled by all isolates.
-  Future<int> totalRequests() async {
-    final completer = Completer<Object>();
+  /// The number of requests handled by all isolates, or null if the
+  /// coordinator does not answer in time.
+  Future<int?> totalRequests() async {
+    final reply = await _call(
+      _totalRequestsTimeoutMs,
+      (callId) => CountRequests(index, callId),
+    );
+    return reply as int?;
+  }
+
+  /// Sends the message from [build], and completes with its reply or with null
+  /// after [timeoutMs].
+  Future<Object?> _call(int timeoutMs, Object Function(int callId) build) {
     final callId = _nextCallId++;
-    _calls[callId] = completer;
-    _hub.send(CountRequests(index, callId));
-    return await completer.future as int;
+    final call = _PendingCall(_clock.elapsedMilliseconds + timeoutMs);
+    _calls[callId] = call;
+    _hub.send(build(callId));
+    // One shared timer: a timer per request would add a system call to each.
+    _expiryTimer ??= Timer.periodic(_expiryInterval, _expireCalls);
+    return call.completer.future;
+  }
+
+  void _expireCalls(Timer timer) {
+    if (_calls.isEmpty) {
+      timer.cancel();
+      _expiryTimer = null;
+      return;
+    }
+    final now = _clock.elapsedMilliseconds;
+    _calls.removeWhere((_, call) {
+      if (now < call.deadlineMs) return false;
+      call.completer.complete(null);
+      _warnUnresponsive();
+      return true;
+    });
+  }
+
+  void _warnUnresponsive() {
+    if (_warnedUnresponsive) return;
+    _warnedUnresponsive = true;
+    // ignore: avoid_print
+    print('[QuadrantCluster] Isolate $index: the main isolate is not '
+        'answering, so rateLimit() is counting per isolate until it does. '
+        'Keep long-running work off the main isolate.');
   }
 
   void sendToGroup(String name, Object data) =>
@@ -143,7 +205,9 @@ class ClusterLink {
   void handle(Object? message) {
     switch (message) {
       case CallReply(:final callId, :final value):
-        _calls.remove(callId)?.complete(value);
+        _warnedUnresponsive = false;
+        // A call that already timed out is gone, so a late reply does nothing.
+        _calls.remove(callId)?.completer.complete(value);
       case RequestCountQuery(:final gatherId):
         _hub.send(RequestCountReply(gatherId, requestCount()));
       case GroupDeliver(:final name, :final data):

@@ -92,6 +92,7 @@ Middleware multipartParser({
       return Response.badRequest('Missing multipart boundary');
     }
 
+    final _MultipartResult? result;
     try {
       // Reject early when the client already declares a body that is too big.
       if (maxTotalBytes > 0 && req.raw.contentLength > maxTotalBytes) {
@@ -108,38 +109,37 @@ Middleware multipartParser({
         }
       }
 
-      final result = _parseMultipart(
+      result = _parseMultipart(
         bodyBytes.takeBytes(),
         boundary,
         maxFileSize,
       );
-
-      if (result == null) {
-        return Response.badRequest('Malformed multipart body');
-      }
-
-      if (result.oversized) {
-        return Response(
-          statusCode: 413,
-          headers: {'content-type': 'application/json'},
-          body:
-              '{"error":"Payload Too Large","maxFileBytes":$maxFileSize}',
-        );
-      }
-
-      // Store via Expando for _executeChain to propagate.
-      _multipartOverrides[req.raw] = {
-        ...req.context,
-        filesContextKey: result.files,
-        fieldsContextKey: result.fields,
-      };
-
-      final response = await next();
-      _multipartOverrides[req.raw] = null;
-      return response;
     } catch (_) {
       return Response.badRequest('Invalid multipart body');
     }
+
+    if (result == null) {
+      return Response.badRequest('Malformed multipart body');
+    }
+
+    if (result.oversized) {
+      return Response(
+        statusCode: 413,
+        headers: {'content-type': 'application/json'},
+        body: '{"error":"Payload Too Large","maxFileBytes":$maxFileSize}',
+      );
+    }
+
+    // Store via Expando for _executeChain to propagate.
+    _multipartOverrides[req.raw] = {
+      ...req.context,
+      filesContextKey: result.files,
+      fieldsContextKey: result.fields,
+    };
+
+    // Outside the try: an error from a handler is not a malformed upload, and
+    // must reach the server's error handling.
+    return next();
   };
 }
 
@@ -185,11 +185,15 @@ _MultipartResult? _parseMultipart(
   if (pos == -1) return null;
   pos += delimiterBytes.length;
 
+  // Only a closing delimiter proves that the whole body arrived.
+  var closed = false;
+
   while (pos < body.length) {
     // After delimiter: either \r\n (part follows) or -- (end).
     if (pos + 1 < body.length &&
         body[pos] == 45 && body[pos + 1] == 45) {
-      break; // closing --boundary--
+      closed = true; // closing --boundary--
+      break;
     }
     if (pos + 1 < body.length &&
         body[pos] == 13 && body[pos + 1] == 10) {
@@ -208,12 +212,10 @@ _MultipartResult? _parseMultipart(
 
     // Find next delimiter.
     final nextDelim = _indexOf(body, ascii.encode('\r\n$delimiter'), pos);
-    final partEnd = nextDelim == -1 ? body.length : nextDelim;
+    if (nextDelim == -1) return null; // the body was cut off inside this part
 
-    final partBytes = body.sublist(pos, partEnd);
-    pos = nextDelim == -1
-        ? body.length
-        : nextDelim + 2 + delimiterBytes.length; // skip \r\n + delimiter
+    final partBytes = body.sublist(pos, nextDelim);
+    pos = nextDelim + 2 + delimiterBytes.length; // skip \r\n + delimiter
 
     // Parse part headers.
     final headers = _parsePartHeaders(headerStr);
@@ -239,7 +241,7 @@ _MultipartResult? _parseMultipart(
     }
   }
 
-  return _MultipartResult(files, fields);
+  return closed ? _MultipartResult(files, fields) : null;
 }
 
 Map<String, String> _parsePartHeaders(String raw) {
