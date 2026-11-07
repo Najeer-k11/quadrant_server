@@ -1,6 +1,6 @@
 name: quadrant_server_example
-description: A production-ready reference application for the quadrant_server package.
-version: 1.0.0
+description: A deployable reference application for the quadrant_server package.
+version: 2.0.0
 publish_to: none
 
 environment:

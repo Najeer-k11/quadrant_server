@@ -1,0 +1,49 @@
+[Unit]
+Description=QuadrantServer example app
+After=network-online.target
+Wants=network-online.target
+# Keep trying after a run of quick failures, rather than giving up for good.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=quadrant
+Group=quadrant
+EnvironmentFile=/etc/quadrant-example/app.env
+Environment=DATA_DIR=/var/lib/quadrant-example
+ExecStart=/opt/quadrant-example/server
+
+# Restart after a crash. Exit code 78 is a configuration error, which a restart
+# cannot fix.
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=78
+
+# SIGTERM makes the app finish in-flight requests, for up to 20 seconds.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Each connection uses a file descriptor.
+LimitNOFILE=65536
+
+# Creates /var/lib/quadrant-example, owned by the user above.
+StateDirectory=quadrant-example
+StateDirectoryMode=0750
+UMask=0027
+
+# Hardening: the app can only write to its state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -1,19 +1,26 @@
-version: '3.9'
+# Run from this directory, after creating .env from deploy/app.env.example:
+#   docker compose up --build -d
 
 services:
   app:
     build:
       context: ..
       dockerfile: example/Dockerfile
-    ports:
-      - "5050:5050"
+    env_file: .env
     environment:
+      # Inside the container, so that the published port below can reach it.
+      ADDRESS: "0.0.0.0"
+      DATA_DIR: /data
       PORT: "5050"
-      APP_ENV: "production"
+    # Reachable from this machine only, for nginx. Remove 127.0.0.1 to serve
+    # the internet directly, and then set TRUSTED_PROXY_HOPS=0 in .env.
+    ports:
+      - "127.0.0.1:5050:5050"
+    volumes:
+      - app-data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5050/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # More than the 20 seconds the app takes to finish in-flight requests.
+    stop_grace_period: 30s
+
+volumes:
+  app-data:

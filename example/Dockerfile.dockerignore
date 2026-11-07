@@ -1,3 +1,8 @@
-.dart_tool/
-build/
-.pub-cache/
+**/.dart_tool/
+**/build/
+**/.pub-cache/
+**/data/
+**/.env
+.git/
+benchmark/
+test/

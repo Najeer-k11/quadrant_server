@@ -1,59 +1,36 @@
 import 'package:quadrant_server/quadrant_server.dart';
 
-// ─── Simple token store (replace with JWT in production) ──────
-
-/// Accepted API tokens → user info.
-const _validTokens = <String, Map<String, String>>{
-  'secret-admin-token': {'userId': '1', 'role': 'admin'},
-  'secret-user-token': {'userId': '2', 'role': 'user'},
-};
-
-// ─── Middleware ───────────────────────────────────────────────
-
-/// Bearer-token auth middleware.
+/// Accepts a request whose bearer token is in [tokens], which maps each token
+/// to a role, and puts that role in `req.context['user']`.
 ///
-/// Reads the `Authorization: Bearer <token>` header.
-/// On success — attaches nothing (use req.headers to read downstream).
-/// On failure — short-circuits with 401 Unauthorized.
-///
-/// ```dart
-/// Route.delete(
-///   path: '/api/v1/users/:id',
-///   handler: deleteUser,
-///   middlewares: [requireAuth()],
-/// )
-/// ```
-Middleware requireAuth() {
-  return (Request req, Next next) async {
-    final header = req.headers['authorization'] ?? '';
+/// Fine for a few service tokens. For user accounts, look tokens up in your
+/// database or verify a signed token here instead.
+Middleware requireAuth(Map<String, String> tokens) => bearerAuth<String>(
+      validate: (token) async => _roleOf(tokens, token),
+    );
 
-    if (!header.startsWith('Bearer ')) {
-      return Response.unauthorized('Missing or malformed Authorization header');
-    }
+/// Must come after [requireAuth].
+Middleware requireAdmin() => (Request req, Next next) async {
+      if (req.context['user'] != 'admin') {
+        return Response.forbidden('Admin access required');
+      }
+      return next();
+    };
 
-    final token = header.substring('Bearer '.length).trim();
-
-    if (!_validTokens.containsKey(token)) {
-      return Response.unauthorized('Invalid token');
-    }
-
-    return next();
-  };
+/// Compares against every token in full, so that the time taken does not reveal
+/// how much of a guess was right.
+String? _roleOf(Map<String, String> tokens, String candidate) {
+  String? role;
+  tokens.forEach((token, tokenRole) {
+    if (_sameString(token, candidate)) role = tokenRole;
+  });
+  return role;
 }
 
-/// Admin-only guard. Must be used after [requireAuth].
-///
-/// Extracts the token again and checks the role.
-Middleware requireAdmin() {
-  return (Request req, Next next) async {
-    final token =
-        (req.headers['authorization'] ?? '').replaceFirst('Bearer ', '').trim();
-    final user = _validTokens[token];
-
-    if (user == null || user['role'] != 'admin') {
-      return Response.forbidden('Admin access required');
-    }
-
-    return next();
-  };
+bool _sameString(String a, String b) {
+  var difference = a.length ^ b.length;
+  for (var i = 0; i < a.length; i++) {
+    difference |= a.codeUnitAt(i) ^ b.codeUnitAt(i % (b.isEmpty ? 1 : b.length));
+  }
+  return difference == 0 && b.isNotEmpty;
 }
