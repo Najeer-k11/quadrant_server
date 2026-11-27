@@ -1,6 +1,6 @@
 ## 2.7.1
 
-**2.7.0 was published by mistake with the code of 2.6.0.** It has none of the changes below; upgrade straight to 2.7.1.
+**2.7.0 was published by mistake with the code of 2.6.0, and is retracted.** It has none of the changes below; upgrade from 2.6.0 straight to 2.7.1.
 
 ### Before you upgrade
 
