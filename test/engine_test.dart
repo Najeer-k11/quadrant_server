@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:quadrant_server/quadrant_server.dart';
 import 'package:quadrant_server/src/engine/engine.dart';

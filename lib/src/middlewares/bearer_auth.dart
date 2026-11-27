@@ -63,40 +63,11 @@ Middleware bearerAuth<T extends Object?>({
       return _deny(realm);
     }
 
-    // Inject the principal into the request's context map.
-    // The updated request is visible to all subsequent middlewares and the
-    // handler because the framework re-reads context on each chain step.
-    //
-    // Since Next doesn't accept a Request, we propagate via Expando.
-    _contextOverrides[req.raw] = {...req.context, contextKey: principal};
-
-    try {
-      return await next();
-    } finally {
-      _contextOverrides[req.raw] = null;
-    }
+    // Next takes no Request, so the principal goes to the rest of the chain
+    // through the request's scope.
+    addPendingContext(req, {contextKey: principal});
+    return next();
   };
-}
-
-/// Internal expando used to pass a merged context map to the chain runner
-/// without requiring changes to the [Next] typedef.
-///
-/// Keyed on [HttpRequest] — identity-safe, no hash collisions.
-final Expando<Map<String, dynamic>> _contextOverrides =
-    Expando('quadrant_context');
-
-/// Retrieves and merges any pending context override for [req].
-///
-/// Called by [QuadrantServer._executeChain] after each middleware step so
-/// that [bearerAuth]-injected values appear in the downstream request.
-///
-/// This is an **internal** API — not part of the public surface.
-Map<String, dynamic>? consumeContextOverride(Object rawRequest) {
-  final override = _contextOverrides[rawRequest];
-  if (override != null) {
-    _contextOverrides[rawRequest] = null;
-  }
-  return override;
 }
 
 Response _deny(String realm) => Response(

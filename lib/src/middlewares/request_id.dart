@@ -31,12 +31,9 @@ Middleware requestId({
     // Reuse an upstream ID if present, otherwise generate a new UUID v4.
     final id = req.headers[headerName] ?? _uuid();
 
-    // Inject into context via the shared Expando so _executeChain propagates it.
-    _requestIdOverrides[req.raw] = {...req.context, contextKey: id};
+    addPendingContext(req, {contextKey: id});
 
     final response = await next();
-
-    _requestIdOverrides[req.raw] = null;
 
     // Append the ID to the response headers.
     return response.copyWith(headers: {...response.headers, headerName: id});
@@ -97,16 +94,4 @@ int _next() {
   x ^= y ^ (y >>> 26);
   _s1 = x;
   return x + y;
-}
-
-// ─── Context propagation ──────────────────────────────────────
-
-final _requestIdOverrides =
-    Expando<Map<String, dynamic>>('quadrant_request_id');
-
-/// Internal — consumed by [QuadrantServer._executeChain].
-Map<String, dynamic>? consumeRequestIdContext(Object rawRequest) {
-  final val = _requestIdOverrides[rawRequest];
-  if (val != null) _requestIdOverrides[rawRequest] = null;
-  return val;
 }

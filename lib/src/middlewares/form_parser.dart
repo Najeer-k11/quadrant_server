@@ -64,8 +64,8 @@ Middleware formParser({int maxBodyBytes = 65536}) {
       final bodyString = utf8.decode(bodyBytes.takeBytes());
       final parsed = Uri.splitQueryString(bodyString);
 
-      // Store via RequestHolder so _executeChain propagates it.
-      RequestHolder.instance.setParsedBody(req.raw, parsed);
+      // For the rest of the chain, which receives it as req.body.
+      scopeOf(req).pendingBody = parsed;
     } on FormatException {
       return Response.badRequest('Invalid form body');
     }

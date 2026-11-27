@@ -16,12 +16,8 @@ import 'stream_response.dart';
 import 'version.dart';
 import '../realtime/websocket_context.dart';
 import '../realtime/websocket_route.dart';
-import '../middlewares/bearer_auth.dart';
 import '../middlewares/body_parser.dart';
-import '../middlewares/cookie_parser.dart';
 import '../middlewares/cors.dart';
-import '../middlewares/multipart_parser.dart';
-import '../middlewares/request_id.dart';
 
 /// The HTTP implementation a [QuadrantServer] runs on.
 enum ServerEngine {
@@ -305,7 +301,7 @@ class QuadrantServer {
     _inFlightCount++;
 
     Request request = Request.fromHttpRequest(httpRequest);
-    registerSseTracker(httpRequest, _trackSse);
+    scopeOf(request).sseTracker = _sseTracker;
 
     try {
       // Built-in health check — intercept before router.
@@ -370,14 +366,17 @@ class QuadrantServer {
 
         case Matched(:final route, :final params):
           request = request.copyWith(params: params);
-          final allMiddlewares = [...middlewares, ...route.middlewares];
           final response = await _executeChain(
-              allMiddlewares, 0, request, route.handler, httpRequest);
+              _chainFor(route, route.middlewares),
+              0,
+              request,
+              route.handler,
+              httpRequest);
           await _writeResponse(httpRequest.response, response);
 
         case MatchedWebSocket(:final route, :final params):
           var wsRequest = request.copyWith(params: params);
-          final middlewareChain = [...middlewares, ...route.middlewares];
+          final middlewareChain = _chainFor(route, route.middlewares);
           final rejected = await _runMiddlewareChainForUpgrade(
               wsRequest, middlewareChain, 0, httpRequest, (updated) {
             // Keeps what the middlewares added, such as the bearerAuth() user.
@@ -439,6 +438,19 @@ class QuadrantServer {
     return const [];
   }
 
+  /// The global middlewares followed by a route's own, built once per route.
+  List<Middleware> _chainFor(Object route, List<Middleware> routeMiddlewares) {
+    if (routeMiddlewares.isEmpty) return middlewares;
+    return _chains[route] ??= [...middlewares, ...routeMiddlewares];
+  }
+
+  final Map<Object, List<Middleware>> _chains = Map.identity();
+
+  // Created once, rather than a closure per request.
+  late final void Function(Object) _sseTracker = _trackSseObject;
+
+  void _trackSseObject(Object stream) => _trackSse(stream as SseContext);
+
   void _trackSse(SseContext stream) {
     if (_closing) {
       unawaited(stream.close());
@@ -477,26 +489,25 @@ class QuadrantServer {
 
     final middleware = middlewareList[index];
 
-    return middleware(request, () async {
-      final updated = _applyOverrides(request, rawRequest);
-      return _executeChain(middlewareList, index + 1, updated, handler, rawRequest);
-    });
+    // The next step picks up what this middleware handed on, on entry.
+    return middleware(request,
+        () => _executeChain(middlewareList, index + 1, request, handler, rawRequest));
   }
 
-  /// Applies all pending context overrides (body, bearerAuth, requestId,
-  /// cookieParser, multipartParser, Request.setContext) to [request].
+  /// Applies what the previous middleware handed on through the request's
+  /// scope: a parsed body, and context added by `bearerAuth()`,
+  /// `requestId()`, `cookieParser()`, `multipartParser()` or
+  /// [Request.setContext].
   Request _applyOverrides(Request request, HttpRequest rawRequest) {
-    final parsedBody = RequestHolder.instance.consumeParsedBody(rawRequest);
-    if (parsedBody != null) request = request.copyWith(body: parsedBody);
-
-    // Each middleware stores its context addition in its own Expando.
-    // We merge them all in order.
-    for (final consume in _contextConsumers) {
-      final ctx = consume(rawRequest);
-      if (ctx != null) request = request.copyWith(context: ctx);
-    }
-
-    return request;
+    final scope = scopeOf(request);
+    final body = scope.pendingBody ??
+        RequestHolder.instance.consumeParsedBody(rawRequest);
+    final context = scope.pendingContext;
+    if (body == null && context == null) return request;
+    scope
+      ..pendingBody = null
+      ..pendingContext = null;
+    return request.copyWith(body: body, context: context);
   }
 
   Future<Response?> _runMiddlewareChainForUpgrade(
@@ -519,9 +530,8 @@ class QuadrantServer {
 
     final response = await middleware(request, () async {
       nextCalled = true;
-      final updated = _applyOverrides(request, rawRequest);
       chainResult = await _runMiddlewareChainForUpgrade(
-          updated, middlewareList, index + 1, rawRequest, onChainEnd);
+          request, middlewareList, index + 1, rawRequest, onChainEnd);
       return const Response(statusCode: 204);
     });
 
@@ -673,16 +683,6 @@ class QuadrantServer {
     }
   }
 }
-
-/// Where each middleware keeps the context it adds, in the order they are
-/// merged.
-const _contextConsumers = <Map<String, dynamic>? Function(Object)>[
-  consumeContextOverride, // bearerAuth
-  consumeRequestIdContext, // requestId
-  consumeCookieContext, // cookieParser
-  consumeMultipartContext, // multipartParser
-  consumeSetContext, // Request.setContext
-];
 
 /// Turns a failure to start [source], such as a single-subscription stream
 /// that is already in use, into an error event. Thrown directly, it would leave

@@ -44,10 +44,8 @@ Middleware bodyParser({int maxBodyBytes = 1048576}) {
           // pair that skips building the whole body as a String first.
           final decoded = _utf8Json.convert(bodyBytes.takeBytes());
           if (decoded is Map<String, dynamic> || decoded is List<dynamic>) {
-            // Store the parsed body so downstream middlewares and the handler
-            // can access it. Keyed on the HttpRequest object itself via
-            // Expando — true identity, zero hash-collision risk.
-            RequestHolder.instance.setParsedBody(req.raw, decoded as Object);
+            // For the rest of the chain, which receives it as req.body.
+            scopeOf(req).pendingBody = decoded;
           }
         }
       } on FormatException {
@@ -68,29 +66,34 @@ Response _tooLarge(int maxBodyBytes) => Response(
       body: '{"error":"Payload Too Large","maxBytes":$maxBodyBytes}',
     );
 
-/// Holds parsed request bodies so they can be propagated through the
-/// middleware chain without mutating the immutable [Request].
-///
 final _utf8Json = utf8.decoder.fuse(json.decoder);
 
-/// Uses [Expando] keyed on the [HttpRequest] object for guaranteed identity
-/// (no hash-collision risk under concurrent load).
+/// Hands a body parsed by a middleware of your own to the rest of the chain:
+/// from the next step on, it is [Request.body].
 ///
-/// This is an internal mechanism — not part of the public API.
+/// ```dart
+/// RequestHolder.instance.setParsedBody(req.raw, parsed);
+/// return next();
+/// ```
 class RequestHolder {
   RequestHolder._();
   static final instance = RequestHolder._();
 
-  /// Expando keyed on HttpRequest — identity-safe, no hash collisions.
   final Expando<Object> _bodies = Expando('quadrant_body');
 
+  /// Whether [setParsedBody] has ever been called, so that the framework
+  /// only looks here if it has. The built-in parsers do not use it.
+  static bool _used = false;
+
   void setParsedBody(HttpRequest req, Object body) {
+    _used = true;
     _bodies[req] = body;
   }
 
   Object? consumeParsedBody(HttpRequest req) {
+    if (!_used) return null;
     final body = _bodies[req];
-    _bodies[req] = null;
+    if (body != null) _bodies[req] = null;
     return body;
   }
 }

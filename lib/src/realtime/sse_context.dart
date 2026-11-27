@@ -72,7 +72,7 @@ class SseContext {
     httpResponse.bufferOutput = false;
 
     final ctx = SseContext._(httpResponse);
-    _sseTrackers[req.raw]?.call(ctx);
+    scopeOf(req).sseTracker?.call(ctx);
 
     // Mark done when the client disconnects.
     unawaited(req.raw.response.done.then((_) {
@@ -169,19 +169,6 @@ class SseContext {
   /// so the no-op attempt to write this sentinel to an already-closed
   /// connection is silently swallowed.
   Response get response => const Response(statusCode: 200);
-}
-
-final _sseTrackers = Expando<void Function(SseContext)>('quadrant_sse');
-
-/// Tells the server about SSE streams started on [rawRequest], so it can end
-/// them on shutdown.
-///
-/// This is an **internal** API — not part of the public surface.
-void registerSseTracker(
-  Object rawRequest,
-  void Function(SseContext stream) tracker,
-) {
-  _sseTrackers[rawRequest] = tracker;
 }
 
 /// Sends a keep-alive comment ping on [interval] until the connection closes.
