@@ -594,9 +594,30 @@ It does the same work with far fewer allocations per request. Same benchmark and
 - **No HTTP sessions.** `req.raw.session` throws.
 - **`autoCompress` is ignored.** Use the `compress()` middleware.
 - **Stricter about framing.** Requests dart:io would accept but that proxies may read differently are refused with `400`: both `content-length` and `transfer-encoding`, conflicting `content-length`s, folded header lines, a bare CR. A `transfer-encoding` other than `chunked` gets `501`.
-- **Limits on slow and large headers.** A header block must arrive within 30 seconds, or the client gets `408`. One over 64 KB or 100 fields gets `431`.
+- **Limits on slow clients and large headers.** A header block must arrive within 30 seconds, and a body being read must not stall for 30 seconds, or the client gets `408`. A header block over 64 KB or 100 fields gets `431`.
 
-It is new, so try it under your own traffic before relying on it.
+Those limits, and a few more, are set with `EngineOptions`:
+
+```dart
+QuadrantServer(
+  engine: ServerEngine.quadrant,
+  engineOptions: EngineOptions(
+    maxConnections: 10000,          // Past it, new connections get 503.
+    maxRequestsPerConnection: 1000, // Then `connection: close`, to rebalance a cluster.
+    idleTimeout: Duration(seconds: 120),
+    headerTimeout: Duration(seconds: 30),
+    bodyTimeout: Duration(seconds: 30), // Time the handler spends not reading does not count.
+    maxHeaderBytes: 64 * 1024,
+    maxHeaderCount: 100,
+    dateHeader: true,               // Off by default, as with dart:io.
+  ),
+  routes: [...],
+);
+```
+
+`maxConnections` and `maxRequestsPerConnection` have no limit by default, as with dart:io. Only `idleTimeout` also applies to `ServerEngine.dartIo`.
+
+It is new, so try it under your own traffic before relying on it. [`benchmark/soak.dart`](benchmark/soak.dart) runs it for a few minutes under mixed traffic (keep-alive and pipelined requests, uploads, downloads, SSE, WebSockets, slow clients, abrupt disconnects, garbage) and checks every answer, the memory, and that no connection is left open.
 
 ---
 
@@ -691,6 +712,12 @@ dart run benchmark/report.dart --after=my-run        # Writes benchmark/results/
 ```
 
 The results compare the framework with plain `dart:io`, raw Dart sockets and a bare C++ server. The report opens in any browser and needs no network access.
+
+To soak `ServerEngine.quadrant` (or `--engine=dartio`) under mixed traffic:
+
+```bash
+dart run benchmark/soak.dart --seconds=180
+```
 
 ### Releasing
 

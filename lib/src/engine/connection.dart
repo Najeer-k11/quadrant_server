@@ -47,6 +47,13 @@ class _Connection {
   bool _discardBody = false;
   bool _continueSent = false;
 
+  /// Requests started on this connection.
+  int _requests = 0;
+
+  /// When body bytes last arrived, or the handler last started reading,
+  /// for [EngineOptions.bodyTimeout].
+  int _bodyProgressAt = 0;
+
   final ListQueue<List<int>> _queue = ListQueue();
   int _queueOffset = 0;
   int _queuedBytes = 0;
@@ -138,7 +145,7 @@ class _Connection {
           case _readingHead:
             final end = _findHeadEnd(b, offset, _scanFrom, b.length);
             if (end < 0) {
-              if (b.length - offset > _server.maxHeaderBytes) {
+              if (b.length - offset > _server.options.maxHeaderBytes) {
                 throw const _HttpError(431, 'Request header too large');
               }
               final rest = Uint8List.sublistView(b, offset);
@@ -146,10 +153,10 @@ class _Connection {
               _scanFrom = rest.length > 3 ? rest.length - 3 : 0;
               break loop;
             }
-            if (end - offset > _server.maxHeaderBytes) {
+            if (end - offset > _server.options.maxHeaderBytes) {
               throw const _HttpError(431, 'Request header too large');
             }
-            final head = _parseHead(b, offset, end, _server.maxHeaderCount);
+            final head = _parseHead(b, offset, end, _server.options.maxHeaderCount);
             offset = end;
             _startRequest(head);
 
@@ -165,7 +172,7 @@ class _Connection {
             // The next request, sent before this response: kept for later.
             final rest = Uint8List.sublistView(b, offset);
             _pending = rest;
-            if (rest.length > _server.maxHeaderBytes) {
+            if (rest.length > _server.options.maxHeaderBytes) {
               _socket.readEventsEnabled = false;
             }
             break loop;
@@ -191,13 +198,20 @@ class _Connection {
     _responseDone = false;
     _discardBody = false;
     _continueSent = false;
+    final max = _server.options.maxRequestsPerConnection;
+    if (max != null && ++_requests >= max) {
+      // This response says `connection: close`.
+      request.response._persistent = false;
+    }
     if (head.chunked) {
       _chunks = _ChunkedDecoder();
       _enter(_readingBody);
+      _bodyProgressAt = _since;
     } else if (head.contentLength > 0) {
       _chunks = null;
       _bodyRemaining = head.contentLength;
       _enter(_readingBody);
+      _bodyProgressAt = _since;
     } else {
       _enter(_waiting);
       request._body.close();
@@ -212,6 +226,7 @@ class _Connection {
   }
 
   int _feedBody(Uint8List b, int offset) {
+    _bodyProgressAt = _server._now;
     final chunks = _chunks;
     if (chunks != null) {
       offset = chunks.feed(b, offset, b.length, _emitBody);
@@ -233,13 +248,14 @@ class _Connection {
 
   void _endBody() {
     _chunks = null;
+    final responseDone = _responseDone;
+    // The state moves on first: closing the body can run the handler on to
+    // its response right here, inside close(), through the `await for` that
+    // was reading it.
+    if (!responseDone) _enter(_waiting);
     final body = _request!._body;
     if (!body.isClosed) body.close();
-    if (_responseDone) {
-      _nextRequest();
-    } else {
-      _enter(_waiting);
-    }
+    if (responseDone) _nextRequest();
   }
 
   void _onBodyListen() {
@@ -268,6 +284,8 @@ class _Connection {
   /// for more.
   void _resumeReading() {
     if (_processing || _state >= _closingState) return;
+    // Time spent paused was the handler's, not the client's.
+    if (_state == _readingBody) _bodyProgressAt = _server._now;
     try {
       _socket.readEventsEnabled = true;
     } on Object {
@@ -344,7 +362,9 @@ class _Connection {
       final body = request._body;
       if (!body.isClosed) {
         body
-          ..addError(HttpException(error.message))
+          ..addError(error.status == 408
+              ? BodyTimeoutException(error.message)
+              : HttpException(error.message))
           ..close();
       }
       _noKeepAlive = true;
@@ -544,8 +564,14 @@ class _Connection {
         final timeout = _server.idleTimeout;
         if (timeout != null && elapsed >= timeout.inMilliseconds) _destroy();
       case _readingHead:
-        if (elapsed >= _server.headerTimeout.inMilliseconds) {
+        if (elapsed >= _server.options.headerTimeout.inMilliseconds) {
           _reject(const _HttpError(408, 'Request header timeout'));
+        }
+      case _readingBody:
+        if (_bodyFlowing &&
+            now - _bodyProgressAt >=
+                _server.options.bodyTimeout.inMilliseconds) {
+          _reject(const _HttpError(408, 'Request body timeout'));
         }
       case _closingState:
         if (elapsed >= 2000) _destroy();

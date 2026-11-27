@@ -134,6 +134,12 @@ class EngineRequest extends Stream<Uint8List> implements HttpRequest {
   }
 }
 
+/// The error on a request body stream when [EngineOptions.bodyTimeout] ran
+/// out. The framework answers it with `408` unless `onError` says otherwise.
+class BodyTimeoutException extends HttpException {
+  const BodyTimeoutException(super.message);
+}
+
 /// Whether `Uri.parse(target)` would return [target] unchanged in its path
 /// and query: an origin-form target with no percent-escapes, no dot segments,
 /// and only characters a URI may hold as they are.

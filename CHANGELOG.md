@@ -3,6 +3,8 @@
 ### Added
 
 - **`QuadrantServer(engine: ServerEngine.quadrant)`** — An optional HTTP/1.1 engine written in pure Dart on raw sockets, in place of dart:io's `HttpServer`. In the included benchmark it serves about 1.6 to 2 times as many requests per second as the default engine, because it allocates far less per request. It needs no native code, and the package still has no dependencies. `req.raw` is still an `HttpRequest`, so middlewares, SSE, `StreamResponse`, WebSockets, `listenSecure()` and `QuadrantCluster` all work with it. The default is still `ServerEngine.dartIo`. See "A faster HTTP engine" in the README for how it differs.
+- **`EngineOptions`**, passed as `QuadrantServer(engineOptions:)` — Limits for `ServerEngine.quadrant`: `maxConnections` (past it, new connections get `503`), `maxRequestsPerConnection` (then `connection: close`, which spreads long-lived clients across a cluster again), `idleTimeout`, `headerTimeout`, `bodyTimeout` (a body that stops arriving while the handler reads it gets `408`), `maxHeaderBytes`, `maxHeaderCount`, and `dateHeader`. `idleTimeout` also applies to `ServerEngine.dartIo`.
+- **`benchmark/soak.dart`** — Runs a server for minutes under mixed, partly hostile traffic and checks every answer, the memory, and that no connection is left open.
 
 ### Changed
 

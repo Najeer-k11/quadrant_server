@@ -97,6 +97,10 @@ class QuadrantServer {
   /// The HTTP implementation to serve with. Defaults to [ServerEngine.dartIo].
   final ServerEngine engine;
 
+  /// Limits for [ServerEngine.quadrant]: connections, timeouts, header
+  /// sizes. Only `idleTimeout` also applies to [ServerEngine.dartIo].
+  final EngineOptions engineOptions;
+
   final Router _router;
   HttpServer? _server;
 
@@ -124,6 +128,7 @@ class QuadrantServer {
     this.healthCheck = false,
     this.healthCheckPath = '/health',
     this.engine = ServerEngine.dartIo,
+    this.engineOptions = const EngineOptions(),
   }) : _router = Router(
           _buildRouteList(routes, docs,
               webSocketRoutes: webSocketRoutes,
@@ -177,8 +182,10 @@ class QuadrantServer {
   }) async {
     _closing = false;
     _server = _engine == ServerEngine.quadrant
-        ? await EngineServer.bind(address as Object, port, shared: shared)
-        : await HttpServer.bind(address, port, shared: shared);
+        ? await EngineServer.bind(address as Object, port,
+            shared: shared, options: engineOptions)
+        : (await HttpServer.bind(address, port, shared: shared)
+          ..idleTimeout = engineOptions.idleTimeout);
     _server!.listen(_handleRequest);
     _printBanner('http://localhost:$port');
     return _server!;
@@ -212,8 +219,9 @@ class QuadrantServer {
     _closing = false;
     _server = _engine == ServerEngine.quadrant
         ? await EngineServer.bindSecure(address as Object, port, context,
-            shared: shared)
-        : await HttpServer.bindSecure(address, port, context, shared: shared);
+            shared: shared, options: engineOptions)
+        : (await HttpServer.bindSecure(address, port, context, shared: shared)
+          ..idleTimeout = engineOptions.idleTimeout);
     _server!.listen(_handleRequest);
     _printBanner('https://localhost:$port');
     return _server!;
@@ -467,6 +475,13 @@ class QuadrantServer {
     } catch (handlerError) {
       // ignore: avoid_print
       print('[QuadrantServer] onError threw: $handlerError');
+    }
+    if (error is BodyTimeoutException) {
+      return Response(
+        statusCode: HttpStatus.requestTimeout,
+        headers: const {'content-type': 'application/json'},
+        body: '{"error":"Request body timeout"}',
+      );
     }
     return Response.internalServerError(fallback);
   }

@@ -162,6 +162,9 @@ class EngineResponse implements HttpResponse {
         w.bytes(header.line);
       }
 
+      final dateLine = server._dateLine;
+      if (dateLine != null && !names.contains('date')) w.bytes(dateLine);
+
       for (var j = 0; j < count; j++) {
         final name = names[j];
         if (name.isEmpty) continue;
@@ -543,6 +546,10 @@ class EngineResponse implements HttpResponse {
       for (final cookie in cookies) {
         out.write('set-cookie: $cookie\r\n');
       }
+    }
+    final dateLine = server._dateLine;
+    if (dateLine != null && headers._map['date'] == null) {
+      out.write(latin1.decode(dateLine));
     }
     if (server.serverHeader != null && headers._map['server'] == null) {
       out.write('server: ${server.serverHeader}\r\n');

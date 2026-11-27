@@ -13,6 +13,7 @@ export 'src/core/request.dart'
 export 'src/core/response.dart';
 export 'src/routing/route.dart';
 export 'src/core/stream_response.dart';
+export 'src/engine/options.dart';
 export 'src/validation/validator.dart' hide schemaOf;
 
 // ─── Real-time ────────────────────────────────────────────────

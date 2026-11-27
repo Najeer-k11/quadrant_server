@@ -17,6 +17,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'options.dart';
+
+export 'options.dart';
+
 part 'headers.dart';
 part 'parser.dart';
 part 'connection.dart';

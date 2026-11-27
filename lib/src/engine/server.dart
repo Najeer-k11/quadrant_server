@@ -19,20 +19,15 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
   final Stopwatch _clock = Stopwatch()..start();
   bool _closing = false;
 
-  /// Largest request line plus header block accepted, in bytes. Larger gets
-  /// `431`.
-  final int maxHeaderBytes;
-
-  /// Most header fields accepted in one request. More gets `431`.
-  final int maxHeaderCount;
-
-  /// How long a client may take to send a header block once it has started
-  /// one. Slower gets `408` and is disconnected. dart:io has no such limit,
-  /// which lets a slow client hold a connection open indefinitely.
-  final Duration headerTimeout;
+  /// The limits this server applies.
+  final EngineOptions options;
 
   @override
-  Duration? idleTimeout = const Duration(seconds: 120);
+  Duration? idleTimeout;
+
+  /// `date: …\r\n`, reformatted once a second, when [EngineOptions.dateHeader]
+  /// is on.
+  Uint8List? _dateLine;
 
   @override
   String? serverHeader;
@@ -58,15 +53,19 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
     this._listener,
     this._closeListener,
     this.port,
-    this.address, {
-    required this.maxHeaderBytes,
-    required this.maxHeaderCount,
-    required this.headerTimeout,
-  }) {
+    this.address,
+    this.options,
+  ) : idleTimeout = options.idleTimeout {
+    _updateDate();
     _subscription = _listener.listen(
       (socket) {
         if (_closing) {
           socket.close();
+          return;
+        }
+        final max = options.maxConnections;
+        if (max != null && _connections.length >= max) {
+          _refuse(socket);
           return;
         }
         _connections.add(_Connection(this, socket));
@@ -75,6 +74,7 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
       onError: (Object _) {},
     );
     _sweeper = Timer.periodic(const Duration(seconds: 1), (_) {
+      _updateDate();
       final now = _now;
       for (final connection in List.of(_connections)) {
         connection._sweep(now);
@@ -89,16 +89,12 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
     int backlog = 0,
     bool v6Only = false,
     bool shared = false,
-    int maxHeaderBytes = 64 * 1024,
-    int maxHeaderCount = 100,
-    Duration headerTimeout = const Duration(seconds: 30),
+    EngineOptions options = const EngineOptions(),
   }) async {
     final socket = await RawServerSocket.bind(address, port,
         backlog: backlog, v6Only: v6Only, shared: shared);
-    return EngineServer._(socket, socket.close, socket.port, socket.address,
-        maxHeaderBytes: maxHeaderBytes,
-        maxHeaderCount: maxHeaderCount,
-        headerTimeout: headerTimeout);
+    return EngineServer._(
+        socket, socket.close, socket.port, socket.address, options);
   }
 
   /// Binds an HTTPS server, as [HttpServer.bindSecure] does.
@@ -109,16 +105,56 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
     int backlog = 0,
     bool v6Only = false,
     bool shared = false,
-    int maxHeaderBytes = 64 * 1024,
-    int maxHeaderCount = 100,
-    Duration headerTimeout = const Duration(seconds: 30),
+    EngineOptions options = const EngineOptions(),
   }) async {
     final socket = await RawSecureServerSocket.bind(address, port, context,
         backlog: backlog, v6Only: v6Only, shared: shared);
-    return EngineServer._(socket, socket.close, socket.port, socket.address,
-        maxHeaderBytes: maxHeaderBytes,
-        maxHeaderCount: maxHeaderCount,
-        headerTimeout: headerTimeout);
+    return EngineServer._(
+        socket, socket.close, socket.port, socket.address, options);
+  }
+
+  void _updateDate() {
+    if (!options.dateHeader) return;
+    _dateLine =
+        latin1.encode('date: ${HttpDate.format(DateTime.now())}\r\n');
+  }
+
+  /// Answers `503` on a connection over [EngineOptions.maxConnections] and
+  /// closes it. The sending side closes first, so that the client reads the
+  /// answer instead of a reset.
+  static void _refuse(RawSocket socket) {
+    var closed = false;
+    void close() {
+      if (closed) return;
+      closed = true;
+      socket.close();
+    }
+
+    final timer = Timer(const Duration(seconds: 2), close);
+    try {
+      socket.writeEventsEnabled = false;
+      socket.write(_serviceUnavailable);
+      socket.shutdown(SocketDirection.send);
+    } on Object {
+      timer.cancel();
+      close();
+      return;
+    }
+    socket.listen(
+      (event) {
+        if (event == RawSocketEvent.read) {
+          socket.read(); // Discarded.
+        } else if (event == RawSocketEvent.readClosed ||
+            event == RawSocketEvent.closed) {
+          timer.cancel();
+          close();
+        }
+      },
+      onError: (Object _) {
+        timer.cancel();
+        close();
+      },
+    );
   }
 
   int get _now => _clock.elapsedMilliseconds;
@@ -202,3 +238,8 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
   @override
   set sessionTimeout(int timeout) {}
 }
+
+final Uint8List _serviceUnavailable =
+    latin1.encode('HTTP/1.1 503 Service Unavailable\r\n'
+        'content-length: 0\r\n'
+        'connection: close\r\n\r\n');

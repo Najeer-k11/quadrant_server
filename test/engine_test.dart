@@ -41,6 +41,16 @@ void main() {
             body: 'no',
           ),
         ),
+        Route.post(
+          path: '/count',
+          handler: (req) async {
+            var bytes = 0;
+            await for (final chunk in req.raw) {
+              bytes += chunk.length;
+            }
+            return Response.text('$bytes');
+          },
+        ),
         Route.get(
           path: '/cased',
           handler: (req) async => Response(
@@ -146,6 +156,25 @@ void main() {
       final raw = await received.timeout(_limit);
       expect(raw, contains('{"body":{"a":[1,2]}}'));
       expect(raw, endsWith('hello'));
+    });
+
+    test('keeps the connection after a chunked body read with await for',
+        () async {
+      // Closing the body stream can run the handler to its response inside
+      // close(). The connection must already know the body is done, or it
+      // drops the connection as if the response came first.
+      final client = HttpClient();
+      addTearDown(client.close);
+      final ports = <int>{};
+      for (var i = 0; i < 5; i++) {
+        final request = await client.post('127.0.0.1', port, '/count');
+        request.headers.chunkedTransferEncoding = true;
+        request.add(List.filled(200000, 1));
+        final response = await request.close();
+        expect(await response.transform(utf8.decoder).join(), '200000');
+        ports.add(response.connectionInfo!.localPort);
+      }
+      expect(ports, hasLength(1), reason: 'one keep-alive connection');
     });
 
     test('decodes a chunked body with extensions and trailers', () async {
