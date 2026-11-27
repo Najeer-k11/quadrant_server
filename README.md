@@ -26,6 +26,7 @@ final app = QuadrantServer(
 | **Middleware** | 15 built in: security headers, CORS, auth, rate limiting, body parsing, streaming uploads, compression, caching and more |
 | **Real-time** | WebSockets with rooms and heartbeats, Server-Sent Events |
 | **Validation** | Schemas with nested objects, typed values and field-level errors |
+| **Performance** | An optional HTTP/1.1 engine in pure Dart, about twice the throughput of `dart:io`'s server, with connection limits and timeouts |
 | **Multi-core** | One server per isolate on a single port, with rate limits and broadcasts shared between them, and restarts for isolates that die |
 | **Operations** | TLS, graceful shutdown, health check, generated Swagger UI docs, streaming responses |
 
@@ -577,17 +578,16 @@ final app = QuadrantServer(
 );
 ```
 
-It does the same work with far fewer allocations per request. Same benchmark and machine as above:
+It does the same work with far fewer allocations per request. Same benchmark and machine as above, one isolate, median of 3 runs:
 
 | Workload | dart:io | `ServerEngine.quadrant` |
 |---|--:|--:|
-| Plain route, 1 isolate | 68,389 req/s | 128,357 req/s (1.9x) |
-| JSON route, 1 isolate | 67,500 req/s | 117,691 req/s (1.7x) |
-| `requestId`, `helmet`, `cors`, `logger`, `bodyParser` | 45,048 req/s | 69,189 req/s (1.5x) |
-| POST with a 1 KB JSON body | 54,616 req/s | 89,101 req/s (1.6x) |
-| Plain route, 8 isolates | 169,370 req/s | 324,860 req/s (1.9x) |
-| Middleware stack, 8 isolates | 124,606 req/s | 194,080 req/s (1.6x) |
-| 256 connections, 10 ms simulated query | 37% of a core | 25% of a core |
+| Plain route | 69,210 req/s | 138,782 req/s (2.0x) |
+| JSON route | 68,157 req/s | 129,010 req/s (1.9x) |
+| `requestId`, `helmet`, `cors`, `logger`, `bodyParser` | 50,986 req/s | 93,074 req/s (1.8x) |
+| POST with a 1 KB JSON body | 58,262 req/s | 103,887 req/s (1.8x) |
+
+For comparison, version 2.6.0 served that middleware stack at 44,563 req/s: the framework itself got faster in 2.7.1 on both engines.
 
 `req.raw` is still an `HttpRequest`, so every middleware, SSE, `StreamResponse`, WebSockets, `listenSecure()` and `QuadrantCluster` work as before. The differences:
 
