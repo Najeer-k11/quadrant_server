@@ -40,8 +40,9 @@ Middleware bodyParser({int maxBodyBytes = 1048576}) {
         }
 
         if (bodyBytes.isNotEmpty) {
-          final bodyString = utf8.decode(bodyBytes.takeBytes());
-          final decoded = jsonDecode(bodyString);
+          // Parsed straight from the bytes: the VM has a fast path for this
+          // pair that skips building the whole body as a String first.
+          final decoded = _utf8Json.convert(bodyBytes.takeBytes());
           if (decoded is Map<String, dynamic> || decoded is List<dynamic>) {
             // Store the parsed body so downstream middlewares and the handler
             // can access it. Keyed on the HttpRequest object itself via
@@ -70,6 +71,8 @@ Response _tooLarge(int maxBodyBytes) => Response(
 /// Holds parsed request bodies so they can be propagated through the
 /// middleware chain without mutating the immutable [Request].
 ///
+final _utf8Json = utf8.decoder.fuse(json.decoder);
+
 /// Uses [Expando] keyed on the [HttpRequest] object for guaranteed identity
 /// (no hash-collision risk under concurrent load).
 ///

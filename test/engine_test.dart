@@ -41,6 +41,27 @@ void main() {
           ),
         ),
         Route.get(
+          path: '/cased',
+          handler: (req) async => Response(
+            statusCode: 200,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'X-Thing': 'first',
+              'x-thing': 'second',
+              'x-name': 'Zoë 日本',
+            },
+            body: 'ok',
+          ),
+        ),
+        Route.get(
+          path: '/badlength',
+          handler: (req) async => const Response(
+            statusCode: 200,
+            headers: {'content-length': '2\r\nx-evil: 1'},
+            body: 'ok',
+          ),
+        ),
+        Route.get(
           path: '/empty',
           handler: (req) async => Response.noContent(),
         ),
@@ -139,6 +160,19 @@ void main() {
       expect(raw, contains('{"body":{"k":"v123"}}'));
     });
 
+    test('a JSON body that is not valid UTF-8 gets 400', () async {
+      final socket = await Socket.connect('127.0.0.1', port);
+      final received = _collect(socket);
+      socket.add([
+        ...latin1.encode('POST /body HTTP/1.1\r\nHost: x\r\n'
+            'Content-Type: application/json\r\nContent-Length: 9\r\n'
+            'Connection: close\r\n\r\n{"a":"'),
+        0xFF,
+        ...latin1.encode('"}'),
+      ]);
+      expect(await received.timeout(_limit), startsWith('HTTP/1.1 400 '));
+    });
+
     test('sends 100 Continue once the body is read', () async {
       final socket = await Socket.connect('127.0.0.1', port);
       final chunks = <String>[];
@@ -177,6 +211,36 @@ void main() {
       expect(raw, startsWith('HTTP/1.1 500 '));
       expect(raw, isNot(contains('pwned')));
       expect(raw, contains('connection: close'));
+    });
+
+    test('names differing only in case: the later wins, as with set()',
+        () async {
+      final raw = await _exchange(
+          port, 'GET /cased HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n');
+      expect(raw, contains('x-thing: second\r\n'));
+      expect(raw, isNot(contains('first')));
+      expect(RegExp(r'^content-type:', multiLine: true).allMatches(raw),
+          hasLength(1));
+    });
+
+    test('a header value beyond Latin-1 goes out wholly as UTF-8', () async {
+      final socket = await Socket.connect('127.0.0.1', port);
+      final bytes = BytesBuilder();
+      final done = Completer<void>();
+      socket.listen(bytes.add, onDone: done.complete);
+      socket.write('GET /cased HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n');
+      await done.future.timeout(_limit);
+      final raw = bytes.takeBytes();
+      // All of it, ë included, rather than a mix a client cannot decode.
+      final expected = [...latin1.encode('x-name: '), ...utf8.encode('Zoë 日本')];
+      expect(_indexOf(raw, expected), greaterThan(0));
+    });
+
+    test('a content-length that is not a number becomes a 500', () async {
+      final raw = await _exchange(
+          port, 'GET /badlength HTTP/1.1\r\nHost: x\r\n\r\n');
+      expect(raw, startsWith('HTTP/1.1 500 '));
+      expect(raw, isNot(contains('x-evil')));
     });
 
     test('HEAD gets the headers of GET and no body', () async {
@@ -425,6 +489,17 @@ void main() {
     expect(seen.headers.host, 'example.com');
     expect(seen.headers.port, 8080);
   });
+}
+
+int _indexOf(List<int> haystack, List<int> needle) {
+  outer:
+  for (var i = 0; i + needle.length <= haystack.length; i++) {
+    for (var j = 0; j < needle.length; j++) {
+      if (haystack[i + j] != needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
 }
 
 QuadrantServer _clusterServer() => QuadrantServer(

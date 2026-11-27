@@ -4,6 +4,12 @@
 
 - **`QuadrantServer(engine: ServerEngine.quadrant)`** — An optional HTTP/1.1 engine written in pure Dart on raw sockets, in place of dart:io's `HttpServer`. In the included benchmark it serves about 1.6 to 2 times as many requests per second as the default engine, because it allocates far less per request. It needs no native code, and the package still has no dependencies. `req.raw` is still an `HttpRequest`, so middlewares, SSE, `StreamResponse`, WebSockets, `listenSecure()` and `QuadrantCluster` all work with it. The default is still `ServerEngine.dartIo`. See "A faster HTTP engine" in the README for how it differs.
 
+### Changed
+
+- **`logger()` prints in batches by default** — Lines logged during one burst of work go out together in a single `print`, straight after it, instead of one system call per request. Each line still appears within about a millisecond. A custom `output` is still called once per line, as before.
+- **`requestId()` generates IDs faster** — Still random UUID v4s, now from a fast generator seeded from `Random.secure()` once per isolate, instead of four calls to `Random.secure()` per request. IDs stay unique, but are no longer unpredictable, so do not use them as secrets.
+- **`bodyParser()` decodes JSON straight from the bytes**, without building the body as a String first.
+
 ## 2.6.0
 
 ### Before you upgrade

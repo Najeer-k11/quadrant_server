@@ -117,19 +117,79 @@ class EngineResponse implements HttpResponse {
 
   /// Writes a complete response in one go. Only valid while [canSendDirect].
   ///
-  /// Header names may be in any case. Values are checked as
-  /// [HttpHeaders.set] would check them.
+  /// Header names may be in any case; if two differ only in case, the later
+  /// one wins, as with [HttpHeaders.set]. Values are checked as
+  /// [HttpHeaders.set] would check them, while they are copied into the
+  /// buffer, so each header is read once.
   Future<void> sendDirect(int status, Map<String, String> responseHeaders,
       List<String> setCookies, String body) {
-    final names = <String>[];
+    final server = _connection._server;
+    final w = server._writer..reset();
+    w.bytes(_statusLineBytes(status));
+
+    final count = responseHeaders.length;
+    final names = List<String>.filled(count, '');
+    final values = List<String>.filled(count, '');
+    var hadCapital = false;
+    String? contentType;
+    String? contentLength;
+    var chunked = false;
+    var userConnection = false;
+    var userServer = false;
+    var persistent = _persistent;
+
     try {
+      var i = 0;
       responseHeaders.forEach((name, value) {
-        final key = EngineHeaders._validateName(name);
-        EngineHeaders._validateValue(value);
-        names.add(key);
+        final lower = _lowerTokenName(name);
+        if (!identical(lower, name)) hadCapital = true;
+        names[i] = lower;
+        values[i++] = value;
       });
+      if (hadCapital) {
+        // Only now can two names clash. Blank all but the last of each.
+        for (var j = 0; j < count; j++) {
+          if (names.indexOf(names[j], j + 1) > j) names[j] = '';
+        }
+      }
+
+      // Defaults first, unless the response sets the same header.
+      for (final header in server._encodedDefaults()) {
+        if (names.contains(header.name)) continue;
+        if (header.name == HttpHeaders.contentTypeHeader) {
+          contentType = header.value;
+        }
+        w.bytes(header.line);
+      }
+
+      for (var j = 0; j < count; j++) {
+        final name = names[j];
+        if (name.isEmpty) continue;
+        final value = values[j];
+        switch (name) {
+          case HttpHeaders.contentTypeHeader:
+            contentType = value;
+          case HttpHeaders.contentLengthHeader:
+            contentLength = value;
+            continue;
+          case HttpHeaders.transferEncodingHeader:
+            if (value.toLowerCase() == 'chunked') {
+              chunked = true;
+              continue;
+            }
+          case HttpHeaders.connectionHeader:
+            userConnection = true;
+            if (value.toLowerCase() == 'close') persistent = false;
+          case 'server':
+            userServer = true;
+        }
+        w.header(name, value);
+      }
       for (final cookie in setCookies) {
-        EngineHeaders._validateValue(cookie);
+        w.header('set-cookie', cookie);
+      }
+      if (contentLength != null && int.tryParse(contentLength) == null) {
+        throw const FormatException('content-length must be a number');
       }
     } on FormatException {
       // Sending it would let the value end the header early. A bare 500 is
@@ -141,105 +201,78 @@ class EngineResponse implements HttpResponse {
     statusCode = status;
     _headersSent = true;
     _closed = true;
-    final server = _connection._server;
-
-    final out = StringBuffer(_statusLine(status, null));
-    String? contentType;
-    String? contentLength;
-    var chunked = false;
-    var userConnection = false;
-
-    // Defaults first, unless the response sets the same header.
-    final defaults = server._defaultPairs();
-    for (var i = 0; i < defaults.length; i += 2) {
-      final name = defaults[i];
-      if (names.contains(name)) continue;
-      if (name == HttpHeaders.contentTypeHeader) contentType = defaults[i + 1];
-      out
-        ..write(name)
-        ..write(': ')
-        ..write(defaults[i + 1])
-        ..write('\r\n');
-    }
-
-    var index = 0;
-    responseHeaders.forEach((_, value) {
-      final name = names[index++];
-      switch (name) {
-        case HttpHeaders.contentTypeHeader:
-          contentType = value;
-        case HttpHeaders.contentLengthHeader:
-          contentLength = value;
-          return;
-        case HttpHeaders.transferEncodingHeader:
-          if (value.toLowerCase() == 'chunked') {
-            chunked = true;
-            return;
-          }
-        case HttpHeaders.connectionHeader:
-          userConnection = true;
-          if (value.toLowerCase() == 'close') _persistent = false;
-      }
-      out
-        ..write(name)
-        ..write(': ')
-        ..write(value)
-        ..write('\r\n');
-    });
-    for (final cookie in setCookies) {
-      out
-        ..write('set-cookie: ')
-        ..write(cookie)
-        ..write('\r\n');
-    }
+    _persistent = persistent;
 
     final noBody = _statusHasNoBody(status);
-    final List<int> bytes = body.isEmpty || noBody
-        ? _empty
-        : _bodyEncodingFor(contentType).encode(body);
+    final isHead = _request.method == 'HEAD';
+    var bodyLength = 0;
+    List<int>? bodyBytes; // Null when the body is ASCII, copied as is.
+    if (!noBody && body.isNotEmpty) {
+      final encoding = _bodyEncodingFor(contentType);
+      if ((identical(encoding, utf8) ||
+              identical(encoding, latin1) ||
+              identical(encoding, ascii)) &&
+          _isAscii(body)) {
+        bodyLength = body.length;
+      } else {
+        bodyBytes = encoding.encode(body);
+        bodyLength = bodyBytes.length;
+      }
+    }
+
     if (!noBody) {
-      if (contentLength != null &&
-          int.tryParse(contentLength!) != bytes.length &&
-          !(_request.method == 'HEAD' && bytes.isEmpty)) {
+      final declared =
+          contentLength == null ? null : int.parse(contentLength);
+      if (declared != null &&
+          declared != bodyLength &&
+          !(isHead && bodyLength == 0)) {
         _fail(HttpException('Content size does not match the specified '
-            'content-length ($contentLength) for ${bytes.length} bytes'));
+            'content-length ($contentLength) for $bodyLength bytes'));
         return Future.error(HttpException('Content-length mismatch'));
       }
-      if (chunked && bytes.isNotEmpty) {
+      if (chunked && bodyLength > 0) {
         // Asked for, so honoured: the whole body as one chunk.
-        out.write('transfer-encoding: chunked\r\n');
+        w.bytes(_transferEncodingChunked);
       } else {
         chunked = false;
-        out
-          ..write('content-length: ')
-          ..write(contentLength ?? bytes.length)
-          ..write('\r\n');
+        w.bytes(_contentLengthPrefix);
+        w.decimal(declared ?? bodyLength);
+        w.crlf();
       }
     }
-    if (server.serverHeader != null && !names.contains('server')) {
-      out.write('server: ${server.serverHeader}\r\n');
+    final serverHeader = server.serverHeader;
+    if (serverHeader != null && !userServer) {
+      try {
+        w.header('server', serverHeader);
+      } on FormatException {
+        // A bad serverHeader is left out rather than failing every response.
+      }
     }
-    if (!userConnection) _writeConnectionHeader(out);
-    out.write('\r\n');
+    if (!userConnection) {
+      final line = _connectionHeaderLine();
+      if (line != null) w.bytes(line);
+    }
+    w.crlf();
 
-    final head = _encodeHead(out.toString());
-    final sendBody = bytes.isNotEmpty && _request.method != 'HEAD';
+    final sendBody = bodyLength > 0 && !isHead;
     if (!sendBody) {
-      _connection._write(head);
+      _connection._write(w.takeCopy());
     } else if (chunked) {
-      _connection._write(head);
-      _connection._write(ascii.encode('${bytes.length.toRadixString(16)}\r\n'));
-      _connection._write(bytes);
+      _connection._write(w.takeCopy());
+      _connection._write(ascii.encode('${bodyLength.toRadixString(16)}\r\n'));
+      _connection._write(bodyBytes ?? latin1.encode(body));
       _connection._write(_lastChunkAfterData);
-    } else if (bytes.length <= 16 * 1024) {
+    } else if (bodyLength <= 16 * 1024) {
       // One write, one syscall.
-      final all = Uint8List(head.length + bytes.length)
-        ..setRange(0, head.length, head)
-        ..setRange(head.length, head.length + bytes.length, bytes);
-      _connection._write(all);
+      if (bodyBytes == null) {
+        w.ascii(body);
+      } else {
+        w.bytes(bodyBytes);
+      }
+      _connection._write(w.takeCopy());
     } else {
-      _connection._write(head);
-      _connection._write(bytes);
+      _connection._write(w.takeCopy());
+      _connection._write(bodyBytes ?? latin1.encode(body));
     }
     return _finish();
   }
@@ -521,12 +554,18 @@ class EngineResponse implements HttpResponse {
   }
 
   void _writeConnectionHeader(StringBuffer out) {
+    final line = _connectionHeaderLine();
+    if (line != null) out.write(latin1.decode(line));
+  }
+
+  /// The `connection` header this response needs, if any. Decides whether
+  /// the connection stays open.
+  Uint8List? _connectionHeaderLine() {
     if (!_persistent || _connection._server._closing) {
       _persistent = false;
-      out.write('connection: close\r\n');
-    } else if (!_request._head.http11) {
-      out.write('connection: keep-alive\r\n');
+      return _connectionClose;
     }
+    return _request._head.http11 ? null : _connectionKeepAlive;
   }
 
   Future<void> _finish() {
@@ -559,7 +598,130 @@ class EngineResponse implements HttpResponse {
   }
 }
 
-final Uint8List _empty = Uint8List(0);
+final Uint8List _connectionClose = latin1.encode('connection: close\r\n');
+final Uint8List _connectionKeepAlive =
+    latin1.encode('connection: keep-alive\r\n');
+final Uint8List _contentLengthPrefix = latin1.encode('content-length: ');
+final Uint8List _transferEncodingChunked =
+    latin1.encode('transfer-encoding: chunked\r\n');
+
+final Map<int, Uint8List> _statusLineCache = {};
+
+Uint8List _statusLineBytes(int status) =>
+    _statusLineCache[status] ??= latin1.encode(_statusLine(status, null));
+
+bool _isAscii(String s) {
+  for (var i = 0; i < s.length; i++) {
+    if (s.codeUnitAt(i) >= 128) return false;
+  }
+  return true;
+}
+
+/// [name] in lower case, or [name] itself if it has no capitals. Throws a
+/// [FormatException] if it is not a valid header name.
+String _lowerTokenName(String name) {
+  if (name.isEmpty) throw const FormatException('Empty header name');
+  var capital = false;
+  for (var i = 0; i < name.length; i++) {
+    final c = name.codeUnitAt(i);
+    if (c > 127 || !_isTokenChar[c]) {
+      throw FormatException('Invalid HTTP header field name: $name', name, i);
+    }
+    if (c >= 0x41 && c <= 0x5A) capital = true;
+  }
+  return capital ? name.toLowerCase() : name;
+}
+
+/// A default header, encoded once.
+class _EncodedHeader {
+  final String name;
+  final String value;
+  final Uint8List line;
+  _EncodedHeader(this.name, this.value)
+      : line = (_HeadWriter()..header(name, value)).takeCopy();
+}
+
+/// Builds a response head, and a small body, in one buffer that is reused
+/// from response to response. [takeCopy] hands out what was written.
+class _HeadWriter {
+  Uint8List _buffer = Uint8List(2048);
+  int _length = 0;
+
+  void reset() => _length = 0;
+
+  void _reserve(int n) {
+    final needed = _length + n;
+    if (needed <= _buffer.length) return;
+    var size = _buffer.length * 2;
+    while (size < needed) {
+      size *= 2;
+    }
+    _buffer = Uint8List(size)..setRange(0, _length, _buffer);
+  }
+
+  void bytes(List<int> data) {
+    _reserve(data.length);
+    _buffer.setRange(_length, _length + data.length, data);
+    _length += data.length;
+  }
+
+  /// Copies [s], which must be ASCII or Latin-1, byte for byte.
+  void ascii(String s) {
+    _reserve(s.length);
+    final buffer = _buffer;
+    var length = _length;
+    for (var i = 0; i < s.length; i++) {
+      buffer[length++] = s.codeUnitAt(i);
+    }
+    _length = length;
+  }
+
+  void decimal(int n) => ascii(n.toString());
+
+  void crlf() {
+    _reserve(2);
+    _buffer[_length++] = _cr;
+    _buffer[_length++] = _lf;
+  }
+
+  /// Writes `name: value\r\n`. [name] must already be a valid lower-case
+  /// name. The value is checked as it is copied: a control character, which
+  /// could end the header early, throws a [FormatException].
+  void header(String name, String value) {
+    _reserve(name.length + value.length + 4);
+    final buffer = _buffer;
+    var length = _length;
+    for (var i = 0; i < name.length; i++) {
+      buffer[length++] = name.codeUnitAt(i);
+    }
+    buffer[length++] = _colon;
+    buffer[length++] = _sp;
+    final valueStart = length;
+    for (var i = 0; i < value.length; i++) {
+      final c = value.codeUnitAt(i);
+      if (c < 32) {
+        if (c != _ht) {
+          throw FormatException('Invalid HTTP header field value', value, i);
+        }
+      } else if (c == 127) {
+        throw FormatException('Invalid HTTP header field value', value, i);
+      } else if (c > 255) {
+        // Not Latin-1, so the whole value goes out as UTF-8 instead.
+        EngineHeaders._validateValue(value);
+        _length = valueStart;
+        bytes(utf8.encode(value));
+        crlf();
+        return;
+      }
+      buffer[length++] = c;
+    }
+    buffer[length++] = _cr;
+    buffer[length++] = _lf;
+    _length = length;
+  }
+
+  Uint8List takeCopy() => Uint8List(_length)..setRange(0, _length, _buffer);
+}
 final Uint8List _crlf = Uint8List.fromList(const [_cr, _lf]);
 final Uint8List _lastChunk = ascii.encode('0\r\n\r\n');
 final Uint8List _lastChunkAfterData = ascii.encode('\r\n0\r\n\r\n');

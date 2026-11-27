@@ -48,8 +48,11 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
     ..set('x-content-type-options', 'nosniff')
     ..set('x-xss-protection', '1; mode=block');
 
-  List<String>? _defaultPairsCache;
-  int _defaultPairsVersion = -1;
+  List<_EncodedHeader>? _defaultsCache;
+  int _defaultsVersion = -1;
+
+  /// Shared by every response: an isolate writes one at a time.
+  final _HeadWriter _writer = _HeadWriter();
 
   EngineServer._(
     this._listener,
@@ -128,23 +131,21 @@ class EngineServer extends Stream<HttpRequest> implements HttpServer {
 
   EngineHeaders _newHeaders() => EngineHeaders._copy(defaultResponseHeaders);
 
-  /// [defaultResponseHeaders] as name, value, name, value, ….
-  List<String> _defaultPairs() {
-    final cached = _defaultPairsCache;
+  /// [defaultResponseHeaders], each encoded once until they change.
+  List<_EncodedHeader> _encodedDefaults() {
+    final cached = _defaultsCache;
     if (cached != null &&
-        _defaultPairsVersion == defaultResponseHeaders._version) {
+        _defaultsVersion == defaultResponseHeaders._version) {
       return cached;
     }
-    final pairs = <String>[];
+    final encoded = <_EncodedHeader>[];
     defaultResponseHeaders.forEach((name, values) {
       for (final value in values) {
-        pairs
-          ..add(name)
-          ..add(value);
+        encoded.add(_EncodedHeader(name, value));
       }
     });
-    _defaultPairsVersion = defaultResponseHeaders._version;
-    return _defaultPairsCache = pairs;
+    _defaultsVersion = defaultResponseHeaders._version;
+    return _defaultsCache = encoded;
   }
 
   String? _defaultContentType() =>

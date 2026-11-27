@@ -159,6 +159,33 @@ QuadrantServer _quadrant(String scenario, ServerEngine engine) {
         middlewares: [requestId()],
         routes: [plainRoute()],
       ),
+    // The rest of q_stack, one middleware at a time.
+    'q_helmet' => QuadrantServer(
+        engine: engine,
+        middlewares: [helmet()],
+        routes: [plainRoute()],
+      ),
+    'q_cors' => QuadrantServer(
+        engine: engine,
+        middlewares: [cors()],
+        routes: [plainRoute()],
+      ),
+    'q_logger' => QuadrantServer(
+        engine: engine,
+        middlewares: [logger(output: (_) {})],
+        routes: [plainRoute()],
+      ),
+    // Printing to stdout, which the benchmark runner reads through a pipe.
+    'q_logger_stdout' => QuadrantServer(
+        engine: engine,
+        middlewares: [logger()],
+        routes: [plainRoute()],
+      ),
+    'q_bodyparser' => QuadrantServer(
+        engine: engine,
+        middlewares: [bodyParser()],
+        routes: [plainRoute()],
+      ),
     'q_stack' => QuadrantServer(
         engine: engine,
         middlewares: [
