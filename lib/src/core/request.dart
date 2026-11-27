@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../engine/engine.dart';
+
 /// Immutable wrapper around [HttpRequest] from dart:io.
 ///
 /// Provides a clean, typed API for handlers and middlewares.
@@ -56,6 +58,7 @@ class Request {
 
   /// Creates a [Request] from a dart:io [HttpRequest].
   factory Request.fromHttpRequest(HttpRequest httpRequest) {
+    if (httpRequest is EngineRequest) return Request._fromEngine(httpRequest);
     final uri = httpRequest.uri;
     final headers = <String, String>{};
     httpRequest.headers.forEach((name, values) {
@@ -69,6 +72,33 @@ class Request {
       // Bad UTF-8 becomes U+FFFD instead of throwing before any handler runs.
       query: Uri.splitQueryString(uri.query,
           encoding: const Utf8Codec(allowMalformed: true)),
+      headers: headers,
+      body: null,
+      context: const {},
+      raw: httpRequest,
+    );
+  }
+
+  /// Reads the engine's parsed form directly, skipping [HttpHeaders] and,
+  /// for plain targets, [Uri].
+  factory Request._fromEngine(EngineRequest httpRequest) {
+    final pairs = httpRequest.headerPairs;
+    final headers = <String, String>{};
+    for (var i = 0; i < pairs.length; i += 2) {
+      final name = pairs[i];
+      final previous = headers[name];
+      headers[name] =
+          previous == null ? pairs[i + 1] : '$previous, ${pairs[i + 1]}';
+    }
+    final query = httpRequest.query;
+    return Request(
+      method: httpRequest.method.toUpperCase(),
+      path: httpRequest.path,
+      params: {},
+      query: query.isEmpty
+          ? {}
+          : Uri.splitQueryString(query,
+              encoding: const Utf8Codec(allowMalformed: true)),
       headers: headers,
       body: null,
       context: const {},
@@ -118,7 +148,8 @@ class Request {
       body is Map<String, dynamic> ? body as Map<String, dynamic> : null;
 
   /// Returns the body as a [List<dynamic>], or null if absent / wrong type.
-  List<dynamic>? get bodyAsList => body is List<dynamic> ? body as List<dynamic> : null;
+  List<dynamic>? get bodyAsList =>
+      body is List<dynamic> ? body as List<dynamic> : null;
 
   // ─── Typed query helpers ─────────────────────────────────────
 

@@ -17,13 +17,19 @@ Future<void> main(List<String> args) async {
   final isolates = int.parse(args[2]);
 
   // QuadrantServer.listen() cannot share a port, so q_* stays on one isolate.
-  if (scenario.startsWith('q_') && isolates != 1) {
+  if ((scenario.startsWith('q_') || scenario.startsWith('qe_')) &&
+      isolates != 1) {
     stderr.writeln('$scenario only supports 1 isolate');
     exit(2);
   }
 
-  if (scenario.startsWith('qc_')) {
-    await _startCluster(scenario.substring(3), port, isolates);
+  // qe_* and qec_* are q_* and qc_* on ServerEngine.quadrant.
+  if (scenario.startsWith('qc_') || scenario.startsWith('qec_')) {
+    final engine = scenario.startsWith('qec_')
+        ? ServerEngine.quadrant
+        : ServerEngine.dartIo;
+    await _startCluster(
+        scenario.substring(scenario.indexOf('_') + 1), port, isolates, engine);
     print('READY');
     return;
   }
@@ -59,17 +65,20 @@ Future<void> _start(String scenario, int port, bool shared) async {
     case 'dartio_cpu':
       return _dartIo(port, shared, () => '${_burn()}');
   }
-  final app = _quadrant(scenario);
+  final app = scenario.startsWith('qe_')
+      ? _quadrant('q_${scenario.substring(3)}', ServerEngine.quadrant)
+      : _quadrant(scenario, ServerEngine.dartIo);
   await app.listen(port: port, address: _address);
 }
 
 /// Kept separate so the `build` closure captures only [scenario].
-Future<void> _startCluster(String scenario, int port, int isolates) =>
+Future<void> _startCluster(
+        String scenario, int port, int isolates, ServerEngine engine) =>
     QuadrantCluster.start(
       isolates: isolates,
       port: port,
       address: _address,
-      build: () => _quadrant('q_$scenario'),
+      build: () => _quadrant('q_$scenario', engine),
     );
 
 // ─── Controls without the framework ──────────────────────────
@@ -122,31 +131,36 @@ Future<Response> _param(Request req) async =>
 
 Future<Response> _noop(Request req, Next next) => next();
 
-QuadrantServer _quadrant(String scenario) {
+QuadrantServer _quadrant(String scenario, ServerEngine engine) {
   Route plainRoute([List<Middleware> middlewares = const []]) =>
       Route.get(path: '/', handler: _plain, middlewares: middlewares);
 
   return switch (scenario) {
-    'q_plain' => QuadrantServer(routes: [plainRoute()]),
+    'q_plain' => QuadrantServer(engine: engine, routes: [plainRoute()]),
     'q_json' => QuadrantServer(
+        engine: engine,
         routes: [Route.get(path: '/', handler: _json)],
       ),
     'q_param1' => QuadrantServer(
+        engine: engine,
         routes: [Route.get(path: '/r99/:id', handler: _param)],
       ),
-    'q_param100' => QuadrantServer(routes: [
+    'q_param100' => QuadrantServer(engine: engine, routes: [
         for (var i = 0; i < 100; i++)
           Route.get(path: '/r$i/:id', handler: _param),
       ]),
     'q_noop5' => QuadrantServer(
+        engine: engine,
         middlewares: [_noop, _noop, _noop, _noop, _noop],
         routes: [plainRoute()],
       ),
     'q_requestid' => QuadrantServer(
+        engine: engine,
         middlewares: [requestId()],
         routes: [plainRoute()],
       ),
     'q_stack' => QuadrantServer(
+        engine: engine,
         middlewares: [
           requestId(),
           helmet(),
@@ -158,6 +172,7 @@ QuadrantServer _quadrant(String scenario) {
       ),
     // The limit is out of reach: this measures the cost of counting.
     'q_ratelimit' => QuadrantServer(
+        engine: engine,
         middlewares: [
           rateLimit(
             maxRequests: 1 << 40,
@@ -168,6 +183,7 @@ QuadrantServer _quadrant(String scenario) {
         routes: [plainRoute()],
       ),
     'q_post_json' => QuadrantServer(
+        engine: engine,
         middlewares: [bodyParser()],
         routes: [
           Route.post(
@@ -178,7 +194,7 @@ QuadrantServer _quadrant(String scenario) {
         ],
       ),
     // Stands in for a database call: waiting, not computing.
-    'q_io10ms' => QuadrantServer(routes: [
+    'q_io10ms' => QuadrantServer(engine: engine, routes: [
         Route.get(
           path: '/',
           handler: (req) async {
@@ -187,7 +203,7 @@ QuadrantServer _quadrant(String scenario) {
           },
         ),
       ]),
-    'q_cpu1ms' => QuadrantServer(routes: [
+    'q_cpu1ms' => QuadrantServer(engine: engine, routes: [
         Route.get(
           path: '/',
           handler: (req) async => Response.text('${_burn()}'),

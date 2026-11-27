@@ -5,7 +5,7 @@ library quadrant_server;
 
 // ─── Core ─────────────────────────────────────────────────────
 export 'src/cluster/cluster.dart';
-export 'src/core/quadrant_app.dart';
+export 'src/core/quadrant_app.dart' hide debugEngineOverride;
 export 'src/routing/quadrant_router.dart';
 export 'src/core/middleware.dart';
 export 'src/core/request.dart' hide consumeSetContext;

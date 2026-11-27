@@ -80,6 +80,25 @@ const _configs = [
   Config('qc_ratelimit'),
   Config('qc_ratelimit', isolates: 4),
   Config('qc_ratelimit', isolates: 8),
+  // The same on ServerEngine.quadrant.
+  Config('qe_plain'),
+  Config('qe_json'),
+  Config('qe_param1', path: '/r99/123'),
+  Config('qe_param100', path: '/r99/123'),
+  Config('qe_noop5'),
+  Config('qe_requestid'),
+  Config('qe_stack'),
+  Config('qe_post_json', method: 'POST', bodyBytes: 1024),
+  Config('qe_plain', connections: 16),
+  Config('qe_plain', connections: 256),
+  Config('qe_plain', connections: 1024),
+  Config('qe_io10ms', connections: 256),
+  Config('qe_cpu1ms'),
+  Config('qe_ratelimit'),
+  Config('qec_plain', isolates: 2),
+  Config('qec_plain', isolates: 4),
+  Config('qec_plain', isolates: 8),
+  Config('qec_stack', isolates: 8),
 ];
 
 Future<void> main(List<String> args) async {
@@ -286,17 +305,16 @@ Map<String, Object> _summarize(Config config, List<Map<String, Object>> runs) {
     'spreadPct': median['rps'] == 0
         ? 0
         : ((high - low) / (median['rps'] as int) * 100).round(),
-    'errorsTotal':
-        runs.fold<int>(0, (sum, r) => sum + (r['errors'] as int)),
-    'non2xxTotal':
-        runs.fold<int>(0, (sum, r) => sum + (r['non2xx'] as int)),
+    'errorsTotal': runs.fold<int>(0, (sum, r) => sum + (r['errors'] as int)),
+    'non2xxTotal': runs.fold<int>(0, (sum, r) => sum + (r['non2xx'] as int)),
     'crashes': runs.where((r) => r['crashed'] == true).length,
   };
 }
 
 String _markdown(List<Map<String, Object>> rows) {
   final out = StringBuffer()
-    ..writeln('| Scenario | Isolates | Conns | req/s | Spread | req/s per core | '
+    ..writeln(
+        '| Scenario | Isolates | Conns | req/s | Spread | req/s per core | '
         'p50 ms | p99 ms | Errors | Crashes | Server CPU | Loader CPU | '
         'Peak RSS |')
     ..writeln('|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|');

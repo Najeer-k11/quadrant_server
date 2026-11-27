@@ -5,6 +5,7 @@ import 'dart:math';
 
 import '../cluster/cluster_link.dart';
 import '../docs/docs.dart';
+import '../engine/engine.dart';
 import 'middleware.dart';
 import 'request.dart';
 import 'response.dart';
@@ -21,6 +22,32 @@ import '../middlewares/cookie_parser.dart';
 import '../middlewares/cors.dart';
 import '../middlewares/multipart_parser.dart';
 import '../middlewares/request_id.dart';
+
+/// The HTTP implementation a [QuadrantServer] runs on.
+enum ServerEngine {
+  /// dart:io's [HttpServer]. The default.
+  dartIo,
+
+  /// Quadrant's own HTTP/1.1 implementation on raw sockets, also pure Dart.
+  /// Roughly twice the throughput of [dartIo] on small requests, because it
+  /// allocates far less per request.
+  ///
+  /// `Request.raw` is still an [HttpRequest], so middlewares, SSE and
+  /// WebSockets work as before. The differences:
+  ///
+  /// - HTTP sessions (`HttpRequest.session`) are not supported.
+  /// - `HttpServer.autoCompress` is ignored; use the `compress()` middleware.
+  /// - A request whose header block takes over 30 seconds to arrive gets
+  ///   `408`, and one over 64 KB gets `431`.
+  /// - Ambiguous framing that dart:io tolerates is refused with `400`, such
+  ///   as both `content-length` and `transfer-encoding`, or folded headers.
+  quadrant,
+}
+
+/// Overrides every server's engine. For running the test suite on both.
+///
+/// This is an **internal** API — not part of the public surface.
+ServerEngine? debugEngineOverride;
 
 /// Error handler type — receives the error and the request, returns a Response.
 typedef ErrorHandler = Response Function(Object error, Request req);
@@ -71,6 +98,9 @@ class QuadrantServer {
   /// Optional global error handler. Returns a [Response].
   final ErrorHandler? onError;
 
+  /// The HTTP implementation to serve with. Defaults to [ServerEngine.dartIo].
+  final ServerEngine engine;
+
   final Router _router;
   HttpServer? _server;
 
@@ -97,6 +127,7 @@ class QuadrantServer {
     this.docsLocalOnly = true,
     this.healthCheck = false,
     this.healthCheckPath = '/health',
+    this.engine = ServerEngine.dartIo,
   }) : _router = Router(
           _buildRouteList(routes, docs,
               webSocketRoutes: webSocketRoutes,
@@ -149,7 +180,9 @@ class QuadrantServer {
     bool shared = false,
   }) async {
     _closing = false;
-    _server = await HttpServer.bind(address, port, shared: shared);
+    _server = _engine == ServerEngine.quadrant
+        ? await EngineServer.bind(address as Object, port, shared: shared)
+        : await HttpServer.bind(address, port, shared: shared);
     _server!.listen(_handleRequest);
     _printBanner('http://localhost:$port');
     return _server!;
@@ -181,8 +214,10 @@ class QuadrantServer {
     context.usePrivateKey(privateKey.path, password: password);
 
     _closing = false;
-    _server =
-        await HttpServer.bindSecure(address, port, context, shared: shared);
+    _server = _engine == ServerEngine.quadrant
+        ? await EngineServer.bindSecure(address as Object, port, context,
+            shared: shared)
+        : await HttpServer.bindSecure(address, port, context, shared: shared);
     _server!.listen(_handleRequest);
     _printBanner('https://localhost:$port');
     return _server!;
@@ -230,6 +265,8 @@ class QuadrantServer {
       await server?.close(force: true);
     }
   }
+
+  ServerEngine get _engine => debugEngineOverride ?? engine;
 
   void _printBanner(String url) {
     if (!docs && !healthCheck) return;
@@ -295,7 +332,9 @@ class QuadrantServer {
       }
 
       // Detect WebSocket upgrade requests.
-      final isUpgrade = WebSocketTransformer.isUpgradeRequest(httpRequest);
+      final isUpgrade = (httpRequest is! EngineRequest ||
+              httpRequest.hasHeader(HttpHeaders.upgradeHeader)) &&
+          WebSocketTransformer.isUpgradeRequest(httpRequest);
 
       final result = _router.match(
         request.method,
@@ -452,13 +491,7 @@ class QuadrantServer {
 
     // Each middleware stores its context addition in its own Expando.
     // We merge them all in order.
-    for (final consume in [
-      consumeContextOverride,       // bearerAuth
-      consumeRequestIdContext,      // requestId
-      consumeCookieContext,         // cookieParser
-      consumeMultipartContext,      // multipartParser
-      consumeSetContext,            // Request.setContext
-    ]) {
+    for (final consume in _contextConsumers) {
       final ctx = consume(rawRequest);
       if (ctx != null) request = request.copyWith(context: ctx);
     }
@@ -595,6 +628,18 @@ class QuadrantServer {
   /// counts as in flight until then.
   Future<void> _writeResponse(
       HttpResponse httpResponse, Response response) async {
+    if (httpResponse is EngineResponse &&
+        response is! StreamResponse &&
+        httpResponse.canSendDirect) {
+      try {
+        await httpResponse.sendDirect(response.statusCode, response.headers,
+            response.cookies, response.body);
+      } catch (_) {
+        // As below: the client went away, or a header was invalid, in which
+        // case the connection has been dropped.
+      }
+      return;
+    }
     try {
       httpResponse.statusCode = response.statusCode;
 
@@ -628,6 +673,16 @@ class QuadrantServer {
     }
   }
 }
+
+/// Where each middleware keeps the context it adds, in the order they are
+/// merged.
+const _contextConsumers = <Map<String, dynamic>? Function(Object)>[
+  consumeContextOverride, // bearerAuth
+  consumeRequestIdContext, // requestId
+  consumeCookieContext, // cookieParser
+  consumeMultipartContext, // multipartParser
+  consumeSetContext, // Request.setContext
+];
 
 /// Turns a failure to start [source], such as a single-subscription stream
 /// that is already in use, into an error event. Thrown directly, it would leave

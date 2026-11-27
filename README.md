@@ -566,6 +566,38 @@ The more work your handlers do, the more isolates help. If they mostly wait on a
 
 For the best performance, deploy a compiled build (`dart compile exe`) rather than using `dart run`.
 
+### A faster HTTP engine
+
+By default the server runs on dart:io's `HttpServer`. `ServerEngine.quadrant` swaps in Quadrant's own HTTP/1.1 implementation, also written in pure Dart, on raw sockets:
+
+```dart
+final app = QuadrantServer(
+  engine: ServerEngine.quadrant,
+  routes: [Route.get(path: '/users', handler: getUsers)],
+);
+```
+
+It does the same work with far fewer allocations per request. Same benchmark and machine as above:
+
+| Workload | dart:io | `ServerEngine.quadrant` |
+|---|--:|--:|
+| Plain route, 1 isolate | 68,389 req/s | 128,357 req/s (1.9x) |
+| JSON route, 1 isolate | 67,500 req/s | 117,691 req/s (1.7x) |
+| `requestId`, `helmet`, `cors`, `logger`, `bodyParser` | 45,048 req/s | 69,189 req/s (1.5x) |
+| POST with a 1 KB JSON body | 54,616 req/s | 89,101 req/s (1.6x) |
+| Plain route, 8 isolates | 169,370 req/s | 324,860 req/s (1.9x) |
+| Middleware stack, 8 isolates | 124,606 req/s | 194,080 req/s (1.6x) |
+| 256 connections, 10 ms simulated query | 37% of a core | 25% of a core |
+
+`req.raw` is still an `HttpRequest`, so every middleware, SSE, `StreamResponse`, WebSockets, `listenSecure()` and `QuadrantCluster` work as before. The differences:
+
+- **No HTTP sessions.** `req.raw.session` throws.
+- **`autoCompress` is ignored.** Use the `compress()` middleware.
+- **Stricter about framing.** Requests dart:io would accept but that proxies may read differently are refused with `400`: both `content-length` and `transfer-encoding`, conflicting `content-length`s, folded header lines, a bare CR. A `transfer-encoding` other than `chunked` gets `501`.
+- **Limits on slow and large headers.** A header block must arrive within 30 seconds, or the client gets `408`. One over 64 KB or 100 fields gets `431`.
+
+It is new, so try it under your own traffic before relying on it.
+
 ---
 
 ## Running in production
