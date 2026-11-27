@@ -56,3 +56,38 @@ void _discard(StreamSubscription<Uint8List> source) {
     source.resume();
   }
 }
+
+/// Reads all of [request]'s body, or returns null as soon as it passes
+/// [maxBytes] (0 for no limit).
+///
+/// With a `content-length`, the bytes go straight into one buffer of that
+/// size. Collecting chunks and joining them at the end would hold the body
+/// twice at its peak.
+Future<Uint8List?> readBodyBytes(HttpRequest request, int maxBytes) async {
+  final declared = request.contentLength;
+  if (declared >= 0 && (maxBytes <= 0 || declared <= maxBytes)) {
+    final bytes = Uint8List(declared);
+    var length = 0;
+    BytesBuilder? overflow; // Only if more arrives than was declared.
+    await for (final chunk in readBody(request)) {
+      if (overflow == null && length + chunk.length <= declared) {
+        bytes.setRange(length, length + chunk.length, chunk);
+        length += chunk.length;
+        continue;
+      }
+      overflow ??= BytesBuilder(copy: false)
+        ..add(Uint8List.sublistView(bytes, 0, length));
+      overflow.add(chunk);
+      if (maxBytes > 0 && overflow.length > maxBytes) return null;
+    }
+    if (overflow != null) return overflow.takeBytes();
+    return length == declared ? bytes : Uint8List.sublistView(bytes, 0, length);
+  }
+
+  final builder = BytesBuilder(copy: false);
+  await for (final chunk in readBody(request)) {
+    builder.add(chunk);
+    if (maxBytes > 0 && builder.length > maxBytes) return null;
+  }
+  return builder.takeBytes();
+}

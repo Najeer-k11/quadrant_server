@@ -4,8 +4,10 @@ part of 'engine.dart';
 /// Past it, the headers go out and the rest streams.
 const int _bufferLimit = 64 * 1024;
 
-/// Bytes queued for the socket at which a streamed body waits for it.
-const int _highWaterMark = 1024 * 1024;
+/// Bytes queued for the socket at which a streamed body waits for it. Each
+/// slow client can hold this much, so it is kept small; the kernel's own
+/// send buffer comes on top.
+const int _highWaterMark = 256 * 1024;
 
 /// An [HttpResponse] written by the engine.
 ///

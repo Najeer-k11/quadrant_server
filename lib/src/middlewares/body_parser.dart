@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import '../core/middleware.dart';
 import '../core/request.dart';
@@ -30,19 +29,13 @@ Middleware bodyParser({int maxBodyBytes = 1048576}) {
         }
 
         // Stream the body, counting bytes to enforce the size limit.
-        // BytesBuilder stores 1 byte per byte; a List<int> would use 8.
-        final bodyBytes = BytesBuilder(copy: false);
-        await for (final chunk in readBody(req.raw)) {
-          bodyBytes.add(chunk);
-          if (maxBodyBytes > 0 && bodyBytes.length > maxBodyBytes) {
-            return _tooLarge(maxBodyBytes);
-          }
-        }
+        final bodyBytes = await readBodyBytes(req.raw, maxBodyBytes);
+        if (bodyBytes == null) return _tooLarge(maxBodyBytes);
 
         if (bodyBytes.isNotEmpty) {
           // Parsed straight from the bytes: the VM has a fast path for this
           // pair that skips building the whole body as a String first.
-          final decoded = _utf8Json.convert(bodyBytes.takeBytes());
+          final decoded = _utf8Json.convert(bodyBytes);
           if (decoded is Map<String, dynamic> || decoded is List<dynamic>) {
             // For the rest of the chain, which receives it as req.body.
             scopeOf(req).pendingBody = decoded;

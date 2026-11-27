@@ -617,6 +617,24 @@ QuadrantServer(
 
 `maxConnections` and `maxRequestsPerConnection` have no limit by default, as with dart:io. Only `idleTimeout` also applies to `ServerEngine.dartIo`.
 
+### Memory
+
+Memory is freed as requests finish, with either engine. Afterwards the Dart VM keeps some of the heap for reuse rather than handing it straight back to the system, so the process stays somewhat above its idle size after a burst. Measured with [`benchmark/memory.dart`](benchmark/memory.dart), compiled:
+
+| | `ServerEngine.quadrant` | dart:io |
+|---|--:|--:|
+| Idle | 9 MB | 9 MB |
+| Per open keep-alive connection | about 7 KB | about 11 KB |
+| 16 clients posting 1 MB JSON bodies and 8 downloading 4 MB, typical peak | about 80 MB | about 75 MB |
+
+To trade some throughput for memory, give a compiled server a smaller young generation through `DART_VM_OPTIONS`. In the large-body test above, this halved memory (peak 82 → 41 MB, 61 → 29 MB afterwards) at about 16% fewer requests per second:
+
+```bash
+DART_VM_OPTIONS=--new_gen_semi_max_size=2 ./server
+```
+
+The biggest lever is usually your own code: `bodyParser()`, `formParser()` and uploads below `diskThreshold` hold each body in memory until the request finishes, so `maxBodyBytes` times your concurrent requests bounds it.
+
 It is new, so try it under your own traffic before relying on it. [`benchmark/soak.dart`](benchmark/soak.dart) runs it for a few minutes under mixed traffic (keep-alive and pipelined requests, uploads, downloads, SSE, WebSockets, slow clients, abrupt disconnects, garbage) and checks every answer, the memory, and that no connection is left open.
 
 ---
@@ -712,6 +730,12 @@ dart run benchmark/report.dart --after=my-run        # Writes benchmark/results/
 ```
 
 The results compare the framework with plain `dart:io`, raw Dart sockets and a bare C++ server. The report opens in any browser and needs no network access.
+
+To measure memory (idle, per connection, and with large bodies) on both engines:
+
+```bash
+dart run benchmark/memory.dart
+```
 
 To soak `ServerEngine.quadrant` (or `--engine=dartio`) under mixed traffic:
 

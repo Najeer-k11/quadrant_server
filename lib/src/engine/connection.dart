@@ -92,7 +92,12 @@ class _Connection {
       case RawSocketEvent.read:
         final Uint8List? data;
         try {
-          data = _socket.read();
+          // What is there, up to the cap. A count above what is there would
+          // allocate that much anyway.
+          final available = _socket.available();
+          data = available <= 0
+              ? _socket.read()
+              : _socket.read(available < _readSize ? available : _readSize);
         } on SocketException {
           _destroy();
           return;
@@ -580,6 +585,11 @@ class _Connection {
     }
   }
 }
+
+/// Most bytes taken from the socket at once. Without a cap, a read takes all
+/// the kernel has buffered, up to 4 MB: for a fast upload on a busy server,
+/// megabytes in one allocation, kept alive by the body chunks viewing it.
+const int _readSize = 64 * 1024;
 
 final Uint8List _continue = ascii.encode('HTTP/1.1 100 Continue\r\n\r\n');
 

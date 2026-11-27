@@ -4,6 +4,7 @@
 
 - **`QuadrantServer(engine: ServerEngine.quadrant)`** — An optional HTTP/1.1 engine written in pure Dart on raw sockets, in place of dart:io's `HttpServer`. In the included benchmark it serves about 1.6 to 2 times as many requests per second as the default engine, because it allocates far less per request. It needs no native code, and the package still has no dependencies. `req.raw` is still an `HttpRequest`, so middlewares, SSE, `StreamResponse`, WebSockets, `listenSecure()` and `QuadrantCluster` all work with it. The default is still `ServerEngine.dartIo`. See "A faster HTTP engine" in the README for how it differs.
 - **`EngineOptions`**, passed as `QuadrantServer(engineOptions:)` — Limits for `ServerEngine.quadrant`: `maxConnections` (past it, new connections get `503`), `maxRequestsPerConnection` (then `connection: close`, which spreads long-lived clients across a cluster again), `idleTimeout`, `headerTimeout`, `bodyTimeout` (a body that stops arriving while the handler reads it gets `408`), `maxHeaderBytes`, `maxHeaderCount`, and `dateHeader`. `idleTimeout` also applies to `ServerEngine.dartIo`.
+- **`benchmark/memory.dart`** — Measures a compiled server's memory: idle, per open connection, and with large bodies, on both engines.
 - **`benchmark/soak.dart`** — Runs a server for minutes under mixed, partly hostile traffic and checks every answer, the memory, and that no connection is left open.
 
 ### Changed
@@ -12,6 +13,8 @@
 - **`requestId()` generates IDs faster** — Still random UUID v4s, now from a fast generator seeded from `Random.secure()` once per isolate, instead of four calls to `Random.secure()` per request. IDs stay unique, but are no longer unpredictable, so do not use them as secrets.
 - **`bodyParser()` decodes JSON straight from the bytes**, without building the body as a String first.
 - **Less work per request in the framework itself** — Middlewares hand context and parsed bodies to the rest of the chain through one object per request, instead of five `Expando` lookups at every step. Each route's middleware list is built once, not per request. The router looks only at the routes whose first path segment fits, instead of every route for the method; the first registered match still wins.
+- **Less memory with large bodies on `ServerEngine.quadrant`** — Reads from a socket are capped at 64 KB. Uncapped, a fast upload on a busy server could take megabytes in one allocation, kept alive by the body chunks pointing into it: in `benchmark/memory.dart`, peaks of 210 to 230 MB came down to about 80 MB, in line with dart:io, and throughput rose by about 12%. A streamed response now waits once 256 KB is queued for a connection, instead of 1 MB, which bounds what each slow client can hold.
+- **`bodyParser()` and `formParser()` read a body with a `content-length` straight into one buffer of that size**, instead of collecting chunks and copying them into one at the end, so a body is not held twice.
 - **`RequestHolder` is only consulted if you use it** — The built-in parsers no longer go through it. `RequestHolder.instance.setParsedBody()` still works for parsers of your own.
 
 ## 2.6.0

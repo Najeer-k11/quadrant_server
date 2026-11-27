@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import '../core/middleware.dart';
 import '../core/request.dart';
@@ -50,18 +49,12 @@ Middleware formParser({int maxBodyBytes = 65536}) {
       }
 
       // Stream bytes with limit.
-      // BytesBuilder stores 1 byte per byte; a List<int> would use 8.
-      final bodyBytes = BytesBuilder(copy: false);
-      await for (final chunk in readBody(req.raw)) {
-        bodyBytes.add(chunk);
-        if (maxBodyBytes > 0 && bodyBytes.length > maxBodyBytes) {
-          return _tooLarge(maxBodyBytes);
-        }
-      }
+      final bodyBytes = await readBodyBytes(req.raw, maxBodyBytes);
+      if (bodyBytes == null) return _tooLarge(maxBodyBytes);
 
       if (bodyBytes.isEmpty) return await next();
 
-      final bodyString = utf8.decode(bodyBytes.takeBytes());
+      final bodyString = utf8.decode(bodyBytes);
       final parsed = Uri.splitQueryString(bodyString);
 
       // For the rest of the chain, which receives it as req.body.
