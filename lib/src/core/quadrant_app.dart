@@ -5,6 +5,7 @@ import 'dart:math';
 
 import '../cluster/cluster_link.dart';
 import '../docs/docs.dart';
+import '../engine/engine.dart';
 import 'middleware.dart';
 import 'request.dart';
 import 'response.dart';
@@ -15,12 +16,34 @@ import 'stream_response.dart';
 import 'version.dart';
 import '../realtime/websocket_context.dart';
 import '../realtime/websocket_route.dart';
-import '../middlewares/bearer_auth.dart';
 import '../middlewares/body_parser.dart';
-import '../middlewares/cookie_parser.dart';
 import '../middlewares/cors.dart';
-import '../middlewares/multipart_parser.dart';
-import '../middlewares/request_id.dart';
+
+/// The HTTP implementation a [QuadrantServer] runs on.
+enum ServerEngine {
+  /// dart:io's [HttpServer]. The default.
+  dartIo,
+
+  /// Quadrant's own HTTP/1.1 implementation on raw sockets, also pure Dart.
+  /// Roughly twice the throughput of [dartIo] on small requests, because it
+  /// allocates far less per request.
+  ///
+  /// `Request.raw` is still an [HttpRequest], so middlewares, SSE and
+  /// WebSockets work as before. The differences:
+  ///
+  /// - HTTP sessions (`HttpRequest.session`) are not supported.
+  /// - `HttpServer.autoCompress` is ignored; use the `compress()` middleware.
+  /// - A request whose header block takes over 30 seconds to arrive gets
+  ///   `408`, and one over 64 KB gets `431`.
+  /// - Ambiguous framing that dart:io tolerates is refused with `400`, such
+  ///   as both `content-length` and `transfer-encoding`, or folded headers.
+  quadrant,
+}
+
+/// Overrides every server's engine. For running the test suite on both.
+///
+/// This is an **internal** API — not part of the public surface.
+ServerEngine? debugEngineOverride;
 
 /// Error handler type — receives the error and the request, returns a Response.
 typedef ErrorHandler = Response Function(Object error, Request req);
@@ -71,6 +94,13 @@ class QuadrantServer {
   /// Optional global error handler. Returns a [Response].
   final ErrorHandler? onError;
 
+  /// The HTTP implementation to serve with. Defaults to [ServerEngine.dartIo].
+  final ServerEngine engine;
+
+  /// Limits for [ServerEngine.quadrant]: connections, timeouts, header
+  /// sizes. Only `idleTimeout` also applies to [ServerEngine.dartIo].
+  final EngineOptions engineOptions;
+
   final Router _router;
   HttpServer? _server;
 
@@ -97,6 +127,8 @@ class QuadrantServer {
     this.docsLocalOnly = true,
     this.healthCheck = false,
     this.healthCheckPath = '/health',
+    this.engine = ServerEngine.dartIo,
+    this.engineOptions = const EngineOptions(),
   }) : _router = Router(
           _buildRouteList(routes, docs,
               webSocketRoutes: webSocketRoutes,
@@ -149,7 +181,11 @@ class QuadrantServer {
     bool shared = false,
   }) async {
     _closing = false;
-    _server = await HttpServer.bind(address, port, shared: shared);
+    _server = _engine == ServerEngine.quadrant
+        ? await EngineServer.bind(address as Object, port,
+            shared: shared, options: engineOptions)
+        : (await HttpServer.bind(address, port, shared: shared)
+          ..idleTimeout = engineOptions.idleTimeout);
     _server!.listen(_handleRequest);
     _printBanner('http://localhost:$port');
     return _server!;
@@ -181,8 +217,11 @@ class QuadrantServer {
     context.usePrivateKey(privateKey.path, password: password);
 
     _closing = false;
-    _server =
-        await HttpServer.bindSecure(address, port, context, shared: shared);
+    _server = _engine == ServerEngine.quadrant
+        ? await EngineServer.bindSecure(address as Object, port, context,
+            shared: shared, options: engineOptions)
+        : (await HttpServer.bindSecure(address, port, context, shared: shared)
+          ..idleTimeout = engineOptions.idleTimeout);
     _server!.listen(_handleRequest);
     _printBanner('https://localhost:$port');
     return _server!;
@@ -231,6 +270,8 @@ class QuadrantServer {
     }
   }
 
+  ServerEngine get _engine => debugEngineOverride ?? engine;
+
   void _printBanner(String url) {
     if (!docs && !healthCheck) return;
     // Once per cluster rather than once per isolate.
@@ -268,7 +309,7 @@ class QuadrantServer {
     _inFlightCount++;
 
     Request request = Request.fromHttpRequest(httpRequest);
-    registerSseTracker(httpRequest, _trackSse);
+    scopeOf(request).sseTracker = _sseTracker;
 
     try {
       // Built-in health check — intercept before router.
@@ -295,7 +336,9 @@ class QuadrantServer {
       }
 
       // Detect WebSocket upgrade requests.
-      final isUpgrade = WebSocketTransformer.isUpgradeRequest(httpRequest);
+      final isUpgrade = (httpRequest is! EngineRequest ||
+              httpRequest.hasHeader(HttpHeaders.upgradeHeader)) &&
+          WebSocketTransformer.isUpgradeRequest(httpRequest);
 
       final result = _router.match(
         request.method,
@@ -331,14 +374,17 @@ class QuadrantServer {
 
         case Matched(:final route, :final params):
           request = request.copyWith(params: params);
-          final allMiddlewares = [...middlewares, ...route.middlewares];
           final response = await _executeChain(
-              allMiddlewares, 0, request, route.handler, httpRequest);
+              _chainFor(route, route.middlewares),
+              0,
+              request,
+              route.handler,
+              httpRequest);
           await _writeResponse(httpRequest.response, response);
 
         case MatchedWebSocket(:final route, :final params):
           var wsRequest = request.copyWith(params: params);
-          final middlewareChain = [...middlewares, ...route.middlewares];
+          final middlewareChain = _chainFor(route, route.middlewares);
           final rejected = await _runMiddlewareChainForUpgrade(
               wsRequest, middlewareChain, 0, httpRequest, (updated) {
             // Keeps what the middlewares added, such as the bearerAuth() user.
@@ -400,6 +446,19 @@ class QuadrantServer {
     return const [];
   }
 
+  /// The global middlewares followed by a route's own, built once per route.
+  List<Middleware> _chainFor(Object route, List<Middleware> routeMiddlewares) {
+    if (routeMiddlewares.isEmpty) return middlewares;
+    return _chains[route] ??= [...middlewares, ...routeMiddlewares];
+  }
+
+  final Map<Object, List<Middleware>> _chains = Map.identity();
+
+  // Created once, rather than a closure per request.
+  late final void Function(Object) _sseTracker = _trackSseObject;
+
+  void _trackSseObject(Object stream) => _trackSse(stream as SseContext);
+
   void _trackSse(SseContext stream) {
     if (_closing) {
       unawaited(stream.close());
@@ -416,6 +475,13 @@ class QuadrantServer {
     } catch (handlerError) {
       // ignore: avoid_print
       print('[QuadrantServer] onError threw: $handlerError');
+    }
+    if (error is BodyTimeoutException) {
+      return Response(
+        statusCode: HttpStatus.requestTimeout,
+        headers: const {'content-type': 'application/json'},
+        body: '{"error":"Request body timeout"}',
+      );
     }
     return Response.internalServerError(fallback);
   }
@@ -438,32 +504,25 @@ class QuadrantServer {
 
     final middleware = middlewareList[index];
 
-    return middleware(request, () async {
-      final updated = _applyOverrides(request, rawRequest);
-      return _executeChain(middlewareList, index + 1, updated, handler, rawRequest);
-    });
+    // The next step picks up what this middleware handed on, on entry.
+    return middleware(request,
+        () => _executeChain(middlewareList, index + 1, request, handler, rawRequest));
   }
 
-  /// Applies all pending context overrides (body, bearerAuth, requestId,
-  /// cookieParser, multipartParser, Request.setContext) to [request].
+  /// Applies what the previous middleware handed on through the request's
+  /// scope: a parsed body, and context added by `bearerAuth()`,
+  /// `requestId()`, `cookieParser()`, `multipartParser()` or
+  /// [Request.setContext].
   Request _applyOverrides(Request request, HttpRequest rawRequest) {
-    final parsedBody = RequestHolder.instance.consumeParsedBody(rawRequest);
-    if (parsedBody != null) request = request.copyWith(body: parsedBody);
-
-    // Each middleware stores its context addition in its own Expando.
-    // We merge them all in order.
-    for (final consume in [
-      consumeContextOverride,       // bearerAuth
-      consumeRequestIdContext,      // requestId
-      consumeCookieContext,         // cookieParser
-      consumeMultipartContext,      // multipartParser
-      consumeSetContext,            // Request.setContext
-    ]) {
-      final ctx = consume(rawRequest);
-      if (ctx != null) request = request.copyWith(context: ctx);
-    }
-
-    return request;
+    final scope = scopeOf(request);
+    final body = scope.pendingBody ??
+        RequestHolder.instance.consumeParsedBody(rawRequest);
+    final context = scope.pendingContext;
+    if (body == null && context == null) return request;
+    scope
+      ..pendingBody = null
+      ..pendingContext = null;
+    return request.copyWith(body: body, context: context);
   }
 
   Future<Response?> _runMiddlewareChainForUpgrade(
@@ -486,9 +545,8 @@ class QuadrantServer {
 
     final response = await middleware(request, () async {
       nextCalled = true;
-      final updated = _applyOverrides(request, rawRequest);
       chainResult = await _runMiddlewareChainForUpgrade(
-          updated, middlewareList, index + 1, rawRequest, onChainEnd);
+          request, middlewareList, index + 1, rawRequest, onChainEnd);
       return const Response(statusCode: 204);
     });
 
@@ -595,6 +653,18 @@ class QuadrantServer {
   /// counts as in flight until then.
   Future<void> _writeResponse(
       HttpResponse httpResponse, Response response) async {
+    if (httpResponse is EngineResponse &&
+        response is! StreamResponse &&
+        httpResponse.canSendDirect) {
+      try {
+        await httpResponse.sendDirect(response.statusCode, response.headers,
+            response.cookies, response.body);
+      } catch (_) {
+        // As below: the client went away, or a header was invalid, in which
+        // case the connection has been dropped.
+      }
+      return;
+    }
     try {
       httpResponse.statusCode = response.statusCode;
 

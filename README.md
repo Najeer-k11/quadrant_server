@@ -566,6 +566,77 @@ The more work your handlers do, the more isolates help. If they mostly wait on a
 
 For the best performance, deploy a compiled build (`dart compile exe`) rather than using `dart run`.
 
+### A faster HTTP engine
+
+By default the server runs on dart:io's `HttpServer`. `ServerEngine.quadrant` swaps in Quadrant's own HTTP/1.1 implementation, also written in pure Dart, on raw sockets:
+
+```dart
+final app = QuadrantServer(
+  engine: ServerEngine.quadrant,
+  routes: [Route.get(path: '/users', handler: getUsers)],
+);
+```
+
+It does the same work with far fewer allocations per request. Same benchmark and machine as above:
+
+| Workload | dart:io | `ServerEngine.quadrant` |
+|---|--:|--:|
+| Plain route, 1 isolate | 68,389 req/s | 128,357 req/s (1.9x) |
+| JSON route, 1 isolate | 67,500 req/s | 117,691 req/s (1.7x) |
+| `requestId`, `helmet`, `cors`, `logger`, `bodyParser` | 45,048 req/s | 69,189 req/s (1.5x) |
+| POST with a 1 KB JSON body | 54,616 req/s | 89,101 req/s (1.6x) |
+| Plain route, 8 isolates | 169,370 req/s | 324,860 req/s (1.9x) |
+| Middleware stack, 8 isolates | 124,606 req/s | 194,080 req/s (1.6x) |
+| 256 connections, 10 ms simulated query | 37% of a core | 25% of a core |
+
+`req.raw` is still an `HttpRequest`, so every middleware, SSE, `StreamResponse`, WebSockets, `listenSecure()` and `QuadrantCluster` work as before. The differences:
+
+- **No HTTP sessions.** `req.raw.session` throws.
+- **`autoCompress` is ignored.** Use the `compress()` middleware.
+- **Stricter about framing.** Requests dart:io would accept but that proxies may read differently are refused with `400`: both `content-length` and `transfer-encoding`, conflicting `content-length`s, folded header lines, a bare CR. A `transfer-encoding` other than `chunked` gets `501`.
+- **Limits on slow clients and large headers.** A header block must arrive within 30 seconds, and a body being read must not stall for 30 seconds, or the client gets `408`. A header block over 64 KB or 100 fields gets `431`.
+
+Those limits, and a few more, are set with `EngineOptions`:
+
+```dart
+QuadrantServer(
+  engine: ServerEngine.quadrant,
+  engineOptions: EngineOptions(
+    maxConnections: 10000,          // Past it, new connections get 503.
+    maxRequestsPerConnection: 1000, // Then `connection: close`, to rebalance a cluster.
+    idleTimeout: Duration(seconds: 120),
+    headerTimeout: Duration(seconds: 30),
+    bodyTimeout: Duration(seconds: 30), // Time the handler spends not reading does not count.
+    maxHeaderBytes: 64 * 1024,
+    maxHeaderCount: 100,
+    dateHeader: true,               // Off by default, as with dart:io.
+  ),
+  routes: [...],
+);
+```
+
+`maxConnections` and `maxRequestsPerConnection` have no limit by default, as with dart:io. Only `idleTimeout` also applies to `ServerEngine.dartIo`.
+
+### Memory
+
+Memory is freed as requests finish, with either engine. Afterwards the Dart VM keeps some of the heap for reuse rather than handing it straight back to the system, so the process stays somewhat above its idle size after a burst. Measured with [`benchmark/memory.dart`](benchmark/memory.dart), compiled:
+
+| | `ServerEngine.quadrant` | dart:io |
+|---|--:|--:|
+| Idle | 9 MB | 9 MB |
+| Per open keep-alive connection | about 7 KB | about 11 KB |
+| 16 clients posting 1 MB JSON bodies and 8 downloading 4 MB, typical peak | about 80 MB | about 75 MB |
+
+To trade some throughput for memory, give a compiled server a smaller young generation through `DART_VM_OPTIONS`. In the large-body test above, this halved memory (peak 82 → 41 MB, 61 → 29 MB afterwards) at about 16% fewer requests per second:
+
+```bash
+DART_VM_OPTIONS=--new_gen_semi_max_size=2 ./server
+```
+
+The biggest lever is usually your own code: `bodyParser()`, `formParser()` and uploads below `diskThreshold` hold each body in memory until the request finishes, so `maxBodyBytes` times your concurrent requests bounds it.
+
+It is new, so try it under your own traffic before relying on it. [`benchmark/soak.dart`](benchmark/soak.dart) runs it for a few minutes under mixed traffic (keep-alive and pipelined requests, uploads, downloads, SSE, WebSockets, slow clients, abrupt disconnects, garbage) and checks every answer, the memory, and that no connection is left open.
+
 ---
 
 ## Running in production
@@ -659,6 +730,18 @@ dart run benchmark/report.dart --after=my-run        # Writes benchmark/results/
 ```
 
 The results compare the framework with plain `dart:io`, raw Dart sockets and a bare C++ server. The report opens in any browser and needs no network access.
+
+To measure memory (idle, per connection, and with large bodies) on both engines:
+
+```bash
+dart run benchmark/memory.dart
+```
+
+To soak `ServerEngine.quadrant` (or `--engine=dartio`) under mixed traffic:
+
+```bash
+dart run benchmark/soak.dart --seconds=180
+```
 
 ### Releasing
 

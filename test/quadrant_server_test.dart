@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:quadrant_server/quadrant_server.dart';
-import 'package:quadrant_server/src/middlewares/cookie_parser.dart';
+import 'package:quadrant_server/src/core/request.dart' show scopeOf;
 import 'package:quadrant_server/src/middlewares/static_files.dart'
     show isPathWithinRoot;
 import 'package:quadrant_server/src/routing/router.dart';
@@ -937,7 +937,9 @@ void main() {
 
       late Map<String, String> capturedCookies;
       await mw(req, () async {
-        final ctx = consumeCookieContext(req.raw);
+        final scope = scopeOf(req);
+        final ctx = scope.pendingContext;
+        scope.pendingContext = null;
         capturedCookies = (ctx?['cookies'] as Map<String, String>?) ?? {};
         return Response.ok(<String, dynamic>{});
       });
@@ -953,7 +955,9 @@ void main() {
 
       late Map<String, String> capturedCookies;
       await mw(req, () async {
-        final ctx = consumeCookieContext(req.raw);
+        final scope = scopeOf(req);
+        final ctx = scope.pendingContext;
+        scope.pendingContext = null;
         capturedCookies = (ctx?['cookies'] as Map<String, String>?) ?? {};
         return Response.ok(<String, dynamic>{});
       });

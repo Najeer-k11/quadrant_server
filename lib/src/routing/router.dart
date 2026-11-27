@@ -4,9 +4,10 @@
 //
 // FEATURES:
 //
-// 1. O(n/m) lookup — routes grouped by HTTP method. Patterns are split once
-//    at startup and each request path once, and the first registered match
-//    wins, so a route can be placed before a more general one.
+// 1. Indexed lookup — routes grouped by HTTP method, then by first path
+//    segment. Patterns are split once at startup and each request path once,
+//    and the first registered match wins, so a route can be placed before a
+//    more general one.
 // 2. Method normalization — 'get' and 'GET' both work
 // 3. HEAD → GET fallback — HTTP spec compliance
 // 4. Trailing slash normalization — '/users/' == '/users'
@@ -130,7 +131,57 @@ class _CompiledRoute {
   final Route route;
   final _CompiledPattern pattern;
 
-  _CompiledRoute(this.route) : pattern = _CompiledPattern(route.path);
+  /// Registration order, which decides between routes that both match.
+  final int order;
+
+  _CompiledRoute(this.route, this.order)
+      : pattern = _CompiledPattern(route.path);
+}
+
+/// One method's routes, indexed by their first segment so that a request
+/// only tries the routes that could match it.
+class _MethodRoutes {
+  /// Routes whose first segment is fixed, by that segment. A route for `/`
+  /// is under the empty string.
+  final Map<String, List<_CompiledRoute>> byFirstSegment = {};
+
+  /// Routes starting with a `:param` or `*`, which any first segment fits.
+  final List<_CompiledRoute> anyFirstSegment = [];
+
+  void add(_CompiledRoute route) {
+    final pattern = route.pattern;
+    if (pattern.fixedLength == 0) {
+      if (pattern.hasWildcard) {
+        anyFirstSegment.add(route);
+      } else {
+        (byFirstSegment[''] ??= []).add(route);
+      }
+    } else if (pattern.paramNames[0] != null) {
+      anyFirstSegment.add(route);
+    } else {
+      (byFirstSegment[pattern.segments[0]] ??= []).add(route);
+    }
+  }
+
+  /// The first route, in registration order, that matches [segments].
+  _CompiledRoute? match(List<String> segments) {
+    final fixed =
+        byFirstSegment[segments.isEmpty ? '' : segments[0]] ?? const [];
+    final any = anyFirstSegment;
+    // Both lists are in registration order: merge them, first match wins.
+    var i = 0, j = 0;
+    while (i < fixed.length || j < any.length) {
+      final _CompiledRoute next;
+      if (j >= any.length ||
+          (i < fixed.length && fixed[i].order < any[j].order)) {
+        next = fixed[i++];
+      } else {
+        next = any[j++];
+      }
+      if (next.pattern.matches(segments)) return next;
+    }
+    return null;
+  }
 }
 
 class _CompiledWebSocketRoute {
@@ -143,8 +194,8 @@ class _CompiledWebSocketRoute {
 /// Internal router. Groups routes by HTTP method for fast lookup.
 /// Returns typed [RouteMatchResult] for proper 404 vs 405 handling.
 class Router {
-  /// Routes grouped by HTTP method for O(n/m) lookup.
-  final Map<String, List<_CompiledRoute>> _routesByMethod = {};
+  /// Routes grouped by HTTP method, then by first segment.
+  final Map<String, _MethodRoutes> _routesByMethod = {};
 
   /// Flat list for MethodNotAllowed lookup.
   final List<_CompiledRoute> _allRoutes = [];
@@ -157,9 +208,9 @@ class Router {
           for (final route in webSocketRoutes) _CompiledWebSocketRoute(route),
         ] {
     for (final route in routes) {
-      final compiled = _CompiledRoute(route);
+      final compiled = _CompiledRoute(route, _allRoutes.length);
       _routesByMethod
-          .putIfAbsent(route.method.toUpperCase(), () => [])
+          .putIfAbsent(route.method.toUpperCase(), _MethodRoutes.new)
           .add(compiled);
       _allRoutes.add(compiled);
     }
@@ -191,20 +242,15 @@ class Router {
     final normalizedMethod = method.toUpperCase();
 
     // HEAD falls back to GET routes (HTTP spec requirement).
-    final lookupMethods =
-        normalizedMethod == 'HEAD' ? ['HEAD', 'GET'] : [normalizedMethod];
-
-    for (final m in lookupMethods) {
-      final candidates = _routesByMethod[m];
-      if (candidates == null) continue;
-      for (final candidate in candidates) {
-        if (candidate.pattern.matches(segments)) {
-          final params = candidate.pattern.tryParams(segments);
-          return params == null
-              ? MalformedPath()
-              : Matched(route: candidate.route, params: params);
-        }
-      }
+    final match = _routesByMethod[normalizedMethod]?.match(segments) ??
+        (normalizedMethod == 'HEAD'
+            ? _routesByMethod['GET']?.match(segments)
+            : null);
+    if (match != null) {
+      final params = match.pattern.tryParams(segments);
+      return params == null
+          ? MalformedPath()
+          : Matched(route: match.route, params: params);
     }
 
     // Check if path exists under any other method → 405.

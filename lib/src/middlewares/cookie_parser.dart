@@ -36,10 +36,8 @@ Middleware cookieParser({String contextKey = 'cookies'}) {
     final cookieHeader = req.headers['cookie'] ?? '';
     final cookies = _parseCookies(cookieHeader);
 
-    _cookieOverrides[req.raw] = {...req.context, contextKey: cookies};
-    final response = await next();
-    _cookieOverrides[req.raw] = null;
-    return response;
+    addPendingContext(req, {contextKey: cookies});
+    return next();
   };
 }
 
@@ -64,16 +62,4 @@ Map<String, String> _parseCookies(String header) {
     }
   }
   return result;
-}
-
-// ─── Context propagation ──────────────────────────────────────
-
-final _cookieOverrides =
-    Expando<Map<String, dynamic>>('quadrant_cookies');
-
-/// Internal — consumed by [QuadrantServer._executeChain].
-Map<String, dynamic>? consumeCookieContext(Object rawRequest) {
-  final val = _cookieOverrides[rawRequest];
-  if (val != null) _cookieOverrides[rawRequest] = null;
-  return val;
 }

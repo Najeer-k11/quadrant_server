@@ -211,12 +211,10 @@ Middleware multipartParser({
       final rejection = await _readBody(req, boundary, store, maxTotalBytes);
       if (rejection != null) return rejection;
 
-      // Store via Expando for _executeChain to propagate.
-      _multipartOverrides[req.raw] = {
-        ...req.context,
+      addPendingContext(req, {
         filesContextKey: store.files,
         fieldsContextKey: store.fields,
-      };
+      });
 
       // Awaited so that the files stay until the handler has finished. An error
       // from a handler is not a malformed upload, so it passes through.
@@ -669,14 +667,3 @@ int _indexOf(Uint8List haystack, Uint8List needle, int start) {
   return -1;
 }
 
-// ─── Context propagation ──────────────────────────────────────
-
-final _multipartOverrides =
-    Expando<Map<String, dynamic>>('quadrant_multipart');
-
-/// Internal — consumed by [QuadrantServer._executeChain].
-Map<String, dynamic>? consumeMultipartContext(Object rawRequest) {
-  final val = _multipartOverrides[rawRequest];
-  if (val != null) _multipartOverrides[rawRequest] = null;
-  return val;
-}
